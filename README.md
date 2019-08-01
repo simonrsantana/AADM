@@ -16,7 +16,7 @@ Here are included some examples of the experiments performed with AADM, includin
 
 Two synthetic dataset were generated: one where the data follows a bimodal posterior distribution and another where the posterior is heteroscedastic. Both the datasets and the code employed can be found in the folder `toy_problems`. The final results, when comparing _alpha = 1.0_ to _alpha = 0.0001_ behave as the following:
 
-<img src="figures/synth_problems.png" alt="Results of AADM in the synthetic toy problems" width="750"/>
+<img src="figures/synth_problems.png" alt="Results of AADM in the synthetic toy problems" width="650"/>
 
 
 
@@ -28,7 +28,7 @@ As an example for the rest of the datasets employed, the folder `UCI_example` in
 * `AVB_boston.py`  -  The Adversarial Variational Bayes code we have reproduced to compare results. This code can be run with the same line of AADM substituting the name of the python script. 
 * `VI_boston.py`  -  Variational Inference to use as a baseline to compare results as well. To run this code use `python3.6 VI_boston.py <split_number> <layers of the main network - 1 or 2> boston_housing.txt`.
 
-<img src="figures/combined_boston.png" alt="Compared results for the three algorithms in the Boston Housing dataset" width="750"/>
+<img src="figures/combined_boston.png" alt="Compared results for the three algorithms in the Boston Housing dataset" width="650"/>
 
 For each dataset we obtained a new set of 20 permutations and averaged the performance, obtaining the results presented in the paper. In order to use this codes for other similar datasets we would only have to change the name of the file employed in the previous calls for the algorithms and create a permutations file accordingly. 
 
@@ -42,7 +42,7 @@ Finally we include the code for one of the experiments we performed in a big dat
 * `AVB_airlines.py`  -  Adversarial Variational Vayes. To run it, use the previous line excluding the flag of the value of _alpha_.
 * `VI_airlines.py`  -  Variational Inference.  To run it do the same as in the case of AVB. 
 
-<img src="figures/combined_airlines.png" alt="Results of the three algorithms over the Airlines Delay dataset" width="750"/>
+<img src="figures/combined_airlines.png" alt="Results of the three algorithms over the Airlines Delay dataset" width="650"/>
 
 
 
