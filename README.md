@@ -42,7 +42,7 @@ Finally we include the code for one of the experiments we performed in a big dat
 * `AVB_airlines.py`  -  Adversarial Variational Vayes. To run it, use the previous line excluding the flag of the value of _alpha_.
 * `VI_airlines.py`  -  Variational Inference.  To run it do the same as in the case of AVB. 
 
-<img src="figures/airlines.png" alt="Results of the three algorithms over the Airlines Delay dataset" width="750"/>
+<img src="figures/combined_airlines.png" alt="Results of the three algorithms over the Airlines Delay dataset" width="750"/>
 
 
 
