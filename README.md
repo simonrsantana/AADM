@@ -1,6 +1,9 @@
-# Code for Adversarial Alpha-Divergence Minimization
+#
+Code for Adversarial Alpha-Divergence Minimization
 
-This repository contains the code for the method of Adversarial Alpha-Divergence Minimization (AADM) algorithm. Some very simple examples are given for the use of the code: a toy problem, one application to the Boston Housing UCI dataset and a final example with a large dataset (Airlines Delay).
+This repository contains the code for the method of Adversarial Alpha-Divergence Minimization (AADM) algorithm. For further information on this method please refer to the [article](https://arxiv.org/abs/1909.06945).
+
+ Some very simple examples are given for the use of the code: a toy problem, one application to the Boston Housing UCI dataset and a final example with a large dataset (Airlines Delay).
 
 ## Dependencies
 
