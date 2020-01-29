@@ -22,18 +22,30 @@ Two synthetic dataset were generated: one where the data follows a bimodal poste
 
 
 
-### UCI example - Boston Housing
+### Regression example - Boston Housing
 
-As an example for the rest of the datasets employed, the folder `UCI_example` includes the code and files necessary to try the AADM algorithm in the Boston Housing dataset (included in the folder as well). The file named `permutations_boston_housing.txt` contains 20 rows of the randomly shuffled index of the rows of the dataset so every method can train using the exact same permutations as the others. To extract the results we executed all the codes in all of these 20 permutations and averaged the performance of each method across them. There are three codes included:
+As an example for the rest of the datasets employed, the folder `regression_example` includes the code and files necessary to try the AADM algorithm in the Boston Housing dataset (included in the folder as well). The file named `permutations_boston_housing.txt` contains 20 rows of the randomly shuffled index of the rows of the dataset so every method can train using the exact same permutations as the others. To extract the results we executed all the codes in all of these 20 permutations and averaged the performance of each method across them. There are three codes included:
 
 * `AADM_boston.py`  -  Our proposed method. To run it use `python3.6 AADM_boston.py <split number> <alpha value> <layers of the main network - 1 or 2> boston_housing.txt`.
-* `AVB_boston.py`  -  The Adversarial Variational Bayes code we have reproduced to compare results. This code can be run with the same line of AADM substituting the name of the python script. 
+* `AVB_boston.py`  -  The Adversarial Variational Bayes code we have reproduced to compare results. This code can be run with the same line of AADM substituting the name of the python script and skipping over the value of alpha needed there. 
 * `VI_boston.py`  -  Variational Inference to use as a baseline to compare results as well. To run this code use `python3.6 VI_boston.py <split_number> <layers of the main network - 1 or 2> boston_housing.txt`.
 
 <img src="figures/combined_boston.png" alt="Compared results for the three algorithms in the Boston Housing dataset" width="650"/>
 
 For each dataset we obtained a new set of 20 permutations and averaged the performance, obtaining the results presented in the paper. In order to use this codes for other similar datasets we would only have to change the name of the file employed in the previous calls for the algorithms and create a permutations file accordingly. 
 
+
+### Classification example - Iono
+
+Similar to the regression case, the folder `classification_example` includes the code and files necessary to try the AADM algorithm in the Iono binary classification dataset (included in the folder as well). The structure and execution of the code is identical to the case for regression. There are three codes included:
+
+* `AADM_iono.py`  -  Our proposed method. To run it use `python3.6 AADM_iono.py <split number> <alpha value> <layers of the main network - 1 or 2> iono.txt`.
+* `AVB_iono.py`  -  Adversarial Variational Bayes for comparison. This code can be run with the same line of AADM substituting the name of the python script and without including the value for alpha.
+* `VI_iono.py`  -  Variational Inference as a baseline to compare results as well. To run this code use `python3.6 VI_iono.py <split_number> <layers of the main network - 1 or 2> iono.txt`.
+
+<img src="figures/combined_iono.png" alt="Compared results for the three algorithms in the Iono dataset" width="650"/>
+
+For each dataset we obtained a new set of 20 permutations and averaged the performance, obtaining the results presented in the paper. In order to use this codes for other similar datasets we would only have to change the name of the file employed in the previous calls for the algorithms and create a permutations file accordingly.
 
 
 ### Big dataset example - Airlines Delay
