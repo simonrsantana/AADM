@@ -1,6 +1,6 @@
-###################################################################################
-##### ADVERSARIAL VARIATIONAL BAYES for classification with alpha divergences #####
-###################################################################################
+############################################################################
+#####  ADVERSARIAL ALPHA DIVERGENCE MINIMIZATION WITH NEURAL NETWORKS  #####
+############################################################################
 
 # Import the relevant packages
 from __future__ import absolute_import
