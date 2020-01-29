@@ -35,9 +35,9 @@ original_file = "shuffle_airlines.npy"
 # This is the total number of training samples
 total_training_data = 1.0
 n_batch = 100
-n_epochs = 1000 # We do not expect the algorithm to fulfill more than a few epochs before it reaches convergence
+n_epochs = 50 # We do not expect the algorithm to fulfill more than a few epochs before it reaches convergence
 n_size_test = 10000
-sampling_batches = 1000
+sampling_batches = 100
 
 mean_targets = 0.0
 std_targets = 1.0
@@ -65,8 +65,8 @@ n_units_disc = 50
 n_units_disc_2 = 50
 
 # Learning ratios
-primal_rate = 1e-4
-dual_rate = 1e-3
+primal_rate = 1e-5
+dual_rate = 1e-4
 
 # Create the model
 x = tf.placeholder(tf.float32, [ None, dim_data ])

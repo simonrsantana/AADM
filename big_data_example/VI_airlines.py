@@ -21,7 +21,6 @@ from datetime import datetime
 
 import tensorflow as tf
 import numpy as np
-import pandas as pd
 
 import os
 os.chdir(".")
@@ -37,9 +36,9 @@ original_file = "shuffle_airlines.npy"
 # This is the total number of training samples
 total_training_data = 1.0
 n_batch = 100
-n_epochs = 1000 # We do not expect the algorithm to fulfill more than a few epochs before it reaches convergence
+n_epochs = 150 # We do not expect the algorithm to fulfill more than a few epochs before it reaches convergence
 n_data_test = 10000
-sampling_batches = 1000       # How often do we want to sample the batches for results in the RMSE and LL
+sampling_batches = 100       # How often do we want to sample the batches for results in the RMSE and LL
 
 mean_targets = 0.0
 std_targets = 1.0
@@ -56,8 +55,8 @@ total_number_weights = (dim_data + 1) * n_units  # Total number of weights used
 total_number_weights_double = n_units * (dim_data + n_units_sec) + n_units_sec
 
 # Learning ratios
-primal_rate = 1e-4
-dual_rate = 1e-3
+primal_rate = 1e-5
+dual_rate = 1e-4
 
 # Create the model
 x = tf.placeholder(tf.float32, [ None, dim_data ])
