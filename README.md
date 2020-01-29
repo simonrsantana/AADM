@@ -1,6 +1,8 @@
 # Code for Adversarial Alpha-Divergence Minimization
 
-This repository contains the code for the method of Adversarial Alpha-Divergence Minimization (AADM) algorithm. Some very simple examples are given for the use of the code: a toy problem, one application to the Boston Housing UCI dataset and a final example with a large dataset (Airlines Delay).
+This repository contains the code for the method of Adversarial Alpha-Divergence Minimization (AADM) algorithm. For further information on this method please refer to the [article](https://arxiv.org/abs/1909.06945).
+
+ Some very simple examples are given for the use of the code: a toy problem, one application to the Boston Housing UCI dataset and a final example with a large dataset (Airlines Delay).
 
 ## Dependencies
 
@@ -36,7 +38,7 @@ For each dataset we obtained a new set of 20 permutations and averaged the perfo
 
 ### Big dataset example - Airlines Delay
 
-Finally we include the code for one of the experiments we performed in a big dataset to study the convergence. The folder `big_data_example` contains the code and the data to perform the Airlines Delay study we present in the paper. The file `shuffled_airlines.npy` should contain the binarized and randomly shuffled dataset of Airlines Delay we have employed for our experiments. The data needs to be downloaded from [here](https://www.kaggle.com/usdot/flight-delays/downloads/airports.csv/1) and converted to the variables we have described in the paper. Once this is done and the results are stored in `.npy` format we can perform the experiments. The three codes included are:
+Finally we include the code for one of the experiments we performed in a big dataset to study the convergence. The folder `big_data_example` contains the code to perform the Airlines Delay study we present in the paper. The data needs to be downloaded from [here](https://www.kaggle.com/usdot/flight-delays/downloads/airports.csv/1) and converted to the variables we have described in the paper. Once this is done, the data need to be shuffled and stored as `shuffled_airlines.npy`. The three codes included here then can be used. They are:
 
 * `AADM_airlines.py`  -  Our method. To run it use `python3.6 AADM_airlines.py <alpha value> <number of layers of the main network - 1 or 2>`.
 * `AVB_airlines.py`  -  Adversarial Variational Vayes. To run it, use the previous line excluding the flag of the value of _alpha_.
