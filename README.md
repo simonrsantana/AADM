@@ -14,12 +14,13 @@ To run the codes we have used Python 3.6. Moreover, the following dependencies m
 
 Here are included some examples of the experiments performed with AADM, including code and the datasets employed. Whenever one of the codes included is executed, it creates a folder and stores the results automatically, which in each case might be different depending on the task we are interested in. 
 
+Each code provides the results for three metrics: for the regression cases, those would be the RMSE, the test log-likelihood and the CRPS. However, for the classification codes we will have the classification error rate, the test log-likelihood and a form of the Brier score, depending on the experiment (binary or multiclass classification). 
+
 ### Synthetic problems
 
-Two synthetic dataset were generated: one where the data follows a bimodal posterior distribution and another where the posterior is heteroscedastic. Both the datasets and the code employed can be found in the folder `toy_problems`. The final results, when comparing _alpha = 1.0_ to _alpha = 0.0001_ behave as the following:
+Two synthetic dataset were generated: one where the data follows a bimodal posterior distribution and another where the posterior is heteroscedastic. Both the datasets and the code employed can be found in the folder `synthetic_problems`. The final results, when comparing _alpha = 1.0_ to _alpha = 0.0001_ behave as the following:
 
 <img src="figures/synth_problems.png" alt="Results of AADM in the synthetic toy problems" width="650"/>
-
 
 
 ### Regression example - Boston Housing
@@ -57,6 +58,11 @@ Finally we include the code for one of the experiments we performed in a big dat
 * `VI_airlines.py`  -  Variational Inference.  To run it do the same as in the case of AVB. 
 
 <img src="figures/combined_airlines.png" alt="Results of the three algorithms over the Airlines Delay dataset" width="650"/>
+
+
+### MNIST
+
+For the case of MNIST we provide two different versions of the code: one with AADM, AVB and VI implemented into fully-connected networks, and another using convolutional neural networks. In the first case, special techniques can be used to accelerate the computation, such as normalizing flows. We have also deactivated the adaptive contrast in this simple case. In the other hand, AADM can be implemented in CNNs, as can be seen here. The resulting code can be used for CIFAR-10 without very strong changes (only modifiying those values concerning the fact that CIFAR-10 images have 3 input channels instead of 1, as in MNIST). 
 
 
 

@@ -19,6 +19,10 @@ import argparse
 import sys
 import time
 from datetime import datetime
+# from properscoring import crps_ensemble
+# from _crps import crps_ensemble, crps_quadrature
+from scipy.stats import norm
+
 
 import tensorflow as tf
 import numpy as np
@@ -32,7 +36,7 @@ os.chdir(".")
 
 # File to be analyzed
 
-original_file = "shuffle_airlines.npy"
+original_file = "shuffle_airplanes.npy"
 
 # This is the total number of training samples
 
@@ -40,9 +44,9 @@ n_samples_train = 10
 n_samples_test = 100
 
 n_batch = 100
-n_epochs = 50 # We do not expect the algorithm to fulfill more than a few epochs before it reaches convergence
+n_epochs = 1000 # We do not expect the algorithm to fulfill more than a few epochs before it reaches convergence
 n_size_test = 10000
-n_batches_to_report = 100
+n_batches_to_report = 1000
 
 # Structural parameters of the main NN
 
@@ -61,7 +65,7 @@ n_layers_disc = 2
 # Learning rates
 
 primal_rate = 1e-5 # Actual Bayesian NN
-dual_rate = 1e-4   # Discriminator 
+dual_rate = 1e-4   # Discriminator
 
 # We define the following two functions to simplify the rest of the code
 
@@ -141,7 +145,7 @@ def create_discriminator(n_units_disc, total_weights, n_layers_disc):
     bias3_disc = w_variable_mean([ 1 ])
 
     return {'W1_disc': W1_disc, 'bias1_disc': bias1_disc, 'W2_disc': W2_disc, \
-        'bias2_disc': bias2_disc, 'W3_disc': W3_disc, 'bias3_disc': bias3_disc, 'n_layers_disc': n_layers_disc, 
+        'bias2_disc': bias2_disc, 'W3_disc': W3_disc, 'bias3_disc': bias3_disc, 'n_layers_disc': n_layers_disc,
         'total_weights': total_weights}
 
 def get_variables_discriminator(discriminator):
@@ -234,7 +238,11 @@ def compute_outputs_main_NN(network, x_input, y_target, mean_targets, std_target
 
     error = tf.reduce_sum((tf.reduce_mean(A3, axis = [ 1 ]) * std_targets + mean_targets - y_target)**2)
 
-    return res_train, error, log_prob_data
+    pre_noise = tf.random_normal(shape = [ tf.shape(x_input)[0], n_samples ]) * tf.exp(log_sigma2_noise)
+    y_test_pre  = pre_noise + A3[:,:,0]
+    y_test = y_test_pre * std_targets + mean_targets
+
+    return res_train, error, log_prob_data, A3[:,:,0]*std_targets + mean_targets, pre_noise*std_targets
 
 ###############################################################################
 ###############################################################################
@@ -295,7 +303,7 @@ def main(alpha, layers):
 
     if n_layers_nn == 2:
         total_weights = n_units_nn * (dim_data + n_units_nn) + n_units_nn # Number of weights for the 2 hidden layers case
-    else: 
+    else:
         total_weights = (dim_data + 1) * n_units_nn  # Total number of weights used
 
     generator = create_generator(n_units_gen, noise_comps_gen, total_weights, n_layers_gen)
@@ -337,9 +345,9 @@ def main(alpha, layers):
     logz = -0.5 * tf.reduce_sum((weights)**2 / tf.exp(main_NN['log_vars_prior']) + main_NN['log_vars_prior'] + np.log(2.0 * np.pi), [ 2 ])
     KL = T_real + logr - logz
 
-    res_train, error, log_prob_data = compute_outputs_main_NN(main_NN, x, y_, mean_targets, std_targets, weights, \
+    res_train, error, log_prob_data, results_mean, results_std = compute_outputs_main_NN(main_NN, x, y_, mean_targets, std_targets, weights, \
         alpha, n_samples, dim_data)
- 
+
     # Make the estimates of the ELBO for the primary classifier
 
     ELBO = (tf.reduce_sum(res_train) - tf.reduce_mean(KL) * tf.cast(tf.shape(x)[ 0 ], tf.float32) / \
@@ -387,13 +395,14 @@ def main(alpha, layers):
                 last_point = np.minimum(n_batch * (i_batch + 1), size_train)
 
                 batch = [ X_train[ i_batch * n_batch : last_point, : ] , y_train[ i_batch * n_batch : last_point, ] ]
-                
+
                 sess.run(train_step_dual, feed_dict={x: batch[ 0 ], y_: batch[ 1 ], n_samples: n_samples_train})
                 sess.run(train_step_primal, feed_dict={x: batch[ 0 ], y_: batch[ 1 ], n_samples: n_samples_train})
 
-                L += sess.run(mean_ELBO, feed_dict={x: batch[ 0 ], y_: batch[ 1 ], n_samples: n_samples_train})
-                kl += sess.run(mean_KL, feed_dict={x: batch[ 0 ], y_: batch[ 1 ], n_samples: n_samples_train})
-                ce_estimate += sess.run(cross_entropy_per_point, feed_dict={x: batch[ 0 ], y_: batch[ 1 ], n_samples: n_samples_train})
+                L_tmp, kl_tmp, ce_estimate_tmp = sess.run([ mean_ELBO, mean_KL, cross_entropy_per_point] , feed_dict={x: batch[ 0 ], y_: batch[ 1 ], n_samples: n_samples_train})
+                L += L_tmp
+                kl += kl_tmp
+                ce_estimate += ce_estimate_tmp
 
 #                sys.stdout.write('.')
 #                sys.stdout.flush()
@@ -405,37 +414,98 @@ def main(alpha, layers):
                     sys.stdout.write('\n')
                     ini_test = time.time()
 
-                    # We do the test evaluation RMSE
+                    ###################################################
+                    # CRPS by the ensemble method for each test value #
+                    ###################################################
 
+                    # crps_raw = np.empty(len(labels))
+                    # for i in range(len(labels)): crps_raw[i] = crps_ensemble(labels[i,0], results[i,:])
+                    # mean_crps_ensemble = np.mean(crps_raw)
+
+                    # np.savetxt('results_AADM/' + str(alpha) + 'raw_CRPS_' + str(split) + ".txt", crps_raw)
+                    # np.savetxt('results_AADM/' + str(alpha) + 'mean_CRPS_' + str(split) + ".txt", [ mean_crps ])
+
+                    ###########################################
+                    # Exact CRPS for the mixture of gaussians #
+                    ###########################################
+
+                    # Define the auxiliary function to help with the calculations
+                    def aux_crps(mu, sigma_2):
+                        first_term = 2 * np.sqrt(sigma_2) * norm.pdf( mu/np.sqrt(sigma_2) )
+                        sec_term = mu * (2 * norm.cdf( mu/np.sqrt(sigma_2) ) - 1)
+                        aux_term = first_term + sec_term
+
+                        return aux_term
+
+                    # np.savetxt('results_AADM/' + str(alpha) + 'raw_exact_CRPS_' + str(split) + ".txt", crps_exact)
+                    # np.savetxt('results_AADM/' + str(alpha) + 'mean_exact_CRPS_' + str(split) + ".txt", [ mean_crps_exact ])
+
+                    # We do the test evaluation for the error metrics
                     SE = 0.0
                     LL  = 0.0
+                    mean_crps_exact = 0.0
                     for i in range(int(np.ceil(X_test.shape[ 0 ] / n_batch))):
 
                         last_point = np.minimum(n_batch * (i + 1), X_test.shape[ 0 ])
 
                         batch = [ X_test[ i * n_batch : last_point, : ] , y_test[ i * n_batch : last_point, ] ]
 
-                        SE += sess.run(error, feed_dict={x: batch[0], y_: batch[1], n_samples: n_samples_test})
-                        LL += sess.run(log_prob_data, feed_dict={x: batch[ 0 ], y_: batch[ 1 ], n_samples: n_samples_test})
+                        SE_tmp, LL_tmp, labels, res_mean, res_std = sess.run([ error, log_prob_data, y_, results_mean, results_std ], \
+                            feed_dict={x: batch[0], y_: batch[1], n_samples: n_samples_test})
+
+                        SE += SE_tmp
+                        LL += LL_tmp
+
+                        # Exact CRPS
+                        shape_quad = res_mean.shape
+
+                        res_var = res_std ** 2
+                        crps_exact = np.empty([ shape_quad[0] ])
+
+                        for i in range(shape_quad[0]):
+                            means_vec = res_mean[i, :]
+                            vars_vec = res_var[i, :]
+
+                            means_diff = np.empty([shape_quad[1], shape_quad[1]])
+                            vars_sum = np.empty([shape_quad[1], shape_quad[1]])
+                            ru, cu = np.triu_indices(means_vec.size,1)
+                            rl, cl = np.tril_indices(means_vec.size,1)
+
+                            means_diff[ru, cu] = means_vec[ru] - means_vec[cu]
+                            means_diff[rl, cl] = means_vec[rl] - means_vec[cl]
+                            vars_sum[ru, cu] = vars_vec[ru] + vars_vec[cu]
+                            vars_sum[rl, cl] = vars_vec[rl] + vars_vec[cl]
+
+                            # Term only depending on the means and vars
+                            fixed_term = 1 / 2 * np.mean(aux_crps(means_diff, vars_sum))
+
+                            # Term that depends on the real value of the data
+                            dev_mean = labels[i, 0] - means_vec
+                            data_term = np.mean(aux_crps(dev_mean, vars_vec))
+
+                            crps_exact[i] = data_term - fixed_term
+
+                        mean_crps_exact += np.mean(crps_exact)
 
                     RMSE = np.sqrt(SE / float(X_test.shape[ 0 ]))
                     TestLL = (LL / float(X_test.shape[ 0 ]))
+                    mean_CRPS = (mean_crps_exact / float(X_test.shape[ 0 ]) )
 
                     fini_test = time.time()
                     fini = time.clock()
                     fini_ref = time.time()
                     total_fini = time.time()
-        
+
                     with open("results_AADM_airlines/res_alpha_" + str(alpha) + "_airlines_350.txt", "a") as res_file:
                         string = ('alpha %g batch %g datetime %s epoch %d ELBO %g CROSS-ENT %g KL %g real_time %g cpu_time %g ' + \
-                            'train_time %g test_time %g total_time %g LL %g RMSE %g') % (alpha, i_batch, str(datetime.now()), epoch, \
+                            'train_time %g test_time %g total_time %g LL %g RMSE %g CRPS_exact %g ') % (alpha, i_batch, str(datetime.now()), epoch, \
                             L / n_batches_to_report, ce_estimate / n_batches_to_report, kl / n_batches_to_report, (fini_ref - \
                             ini_ref), (fini - ini), (fini_train - ini_train), (fini_test - ini_test), (total_fini - total_ini), TestLL, \
-                            RMSE)
+                            RMSE, mean_CRPS)
                         res_file.write(string + "\n")
                         print(string)
                         sys.stdout.flush()
-            
+
                     L = 0.0
                     ce_estimate = 0.0
                     kl = 0.0
@@ -455,3 +525,5 @@ if __name__ == '__main__':
 
 
     main(alpha, layers)
+
+

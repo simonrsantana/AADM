@@ -17,9 +17,12 @@ from __future__ import print_function
 import argparse
 import sys
 import time
+from datetime import datetime
 
 import tensorflow as tf
 import numpy as np
+from scipy.stats import norm
+
 
 import os
 os.chdir(".")
@@ -30,14 +33,16 @@ os.chdir(".")
 
 tf.set_random_seed(123)
 
+n_epochs_to_report = 1
+
 # File to be analyzed
 original_file = "data_bimodal.txt"
 
 # This is the total number of training samples
 total_training_data = 1.0
 n_batch = 10
-n_epochs = 6000
-n_epochs_change = 3000 # int((1/2)*n_epochs)
+n_epochs = 3000 # 6000
+n_epochs_change = 6000 # int((1/2)*n_epochs)
 
 mean_targets = 0.0
 std_targets = 1.0
@@ -267,10 +272,11 @@ def exp_log_likelihood(mean_targets, std_targets, weights_train, weights_test, a
 
     squared_error = tf.reduce_sum((tf.reduce_mean(A2_test, axis = [ 1 ]) * std_targets + mean_targets - y_ )**2)
 
-    y_test  = tf.random_normal(shape = [ tf.shape(x)[0], samples_test ])*tf.exp(log_sigma2_noise) + A2_test[:,:,0]
-    y_test = y_test * std_targets + mean_targets
+    pre_noise = tf.random_normal(shape = [ tf.shape(x)[0], samples_test ], seed = 123)*tf.exp(log_sigma2_noise)
+    y_test_pre  = pre_noise + A2_test[:,:,0]
+    y_test = y_test_pre * std_targets + mean_targets
 
-    return res_train, res_train_2, [ log_sigma2_noise, bias_A1, bias_A2 ], squared_error, log_prob_data_test, y_test
+    return res_train, res_train_2, [ log_sigma2_noise, bias_A1, bias_A2 ], squared_error, log_prob_data_test, y_test, y_test, A2_test[:,:,0]*std_targets + mean_targets, pre_noise*std_targets
 
 
 ###############################
@@ -347,7 +353,11 @@ def exp_log_likelihood_double(mean_targets, std_targets, weights_train, weights_
     y_test_pre  = tf.random_normal(shape = [ tf.shape(x)[0], samples_test ])*tf.exp(log_sigma2_noise) + A3_test[:,:,0]
     y_test = y_test_pre * std_targets + mean_targets
 
-    return res_train, res_train_2, [ log_sigma2_noise, bias_A1, bias_A2, bias_A3 ], squared_error, log_prob_data_test, y_test, y_test_pre, A3_test
+    pre_noise = tf.random_normal(shape = [ tf.shape(x)[0], samples_test ], seed = 123)*tf.exp(log_sigma2_noise)
+    y_test_pre  = pre_noise + A3_test[:,:,0]
+    y_test = y_test_pre * std_targets + mean_targets
+
+    return res_train, res_train_2, [ log_sigma2_noise, bias_A1, bias_A2, bias_A3 ], squared_error, log_prob_data_test, y_test, y_test_pre, A3_test, y_test, A3_test[:,:,0]*std_targets + mean_targets, pre_noise*std_targets
 
 ###############################################################################
 ###############################################################################
@@ -447,9 +457,9 @@ def main(alpha, alpha_2, layers):
 
     # Call the main network to calculate the error metrics for the primary system
     if layers == 1:
-        res_train, res_train_2, vars_network, squared_error, log_prob_data_test, res_test = exp_log_likelihood(mean_targets, std_targets, weights_train, weights_test, alpha, alpha_2) # main loss in the VAE
+        res_train, res_train_2, vars_network, squared_error, log_prob_data_test, res_test, unnorm_results, results_mean, results_std = exp_log_likelihood(mean_targets, std_targets, weights_train, weights_test, alpha, alpha_2) # main loss in the VAE
     elif layers == 2:
-        res_train, res_train_2, vars_network, squared_error, log_prob_data_test, res_test, y_test_pre, A3_test = exp_log_likelihood_double(mean_targets, std_targets, weights_train, weights_test, alpha, alpha_2) # main loss in the VAE
+        res_train, res_train_2, vars_network, squared_error, log_prob_data_test, res_test, y_test_pre, A3_test, unnorm_results, results_mean, results_std = exp_log_likelihood_double(mean_targets, std_targets, weights_train, weights_test, alpha, alpha_2) # main loss in the VAE
 
     # Make the estimates of the ELBO for the primary classifier
     ELBO = tf.reduce_sum(res_train) - tf.reduce_mean(KL) * tf.cast(tf.shape(x)[ 0 ], tf.float32) / tf.cast(total_training_data, tf.float32)
@@ -521,8 +531,8 @@ def main(alpha, alpha_2, layers):
 
             fini = time.clock()
             fini_ref = time.time()
-            if epoch % 100 == 0:
-                print('alpha %g; epoch %d; ELBO %g; real_time %g; cpu_time %g; KL %g' % (alpha, epoch, L, (fini_ref - ini_ref), (fini - ini),  kl))
+            if epoch % n_epochs_to_report == 0:
+                print('alpha %g; hour %s; epoch %d; ELBO %g; real_time %g; cpu_time %g; KL %g' % (alpha, str(datetime.now()), epoch, L, (fini_ref - ini_ref), (fini - ini),  kl))
 
 
             timing.append(fini-ini)
@@ -534,22 +544,59 @@ def main(alpha, alpha_2, layers):
 
         results_write = sess.run(res_test, feed_dict={x: X_test, y_: y_test})
 
-        # We do the test evaluation RMSE
+
+        original_input, results, labels, res_mean, res_std = sess.run([x, unnorm_results, y_, results_mean, results_std], feed_dict={x: X_test, y_: y_test})
+
+
+
+        ###########################################
+        # Exact CRPS for the mixture of gaussians #
+        ###########################################
+
+        shape_quad = res_mean.shape
+
+        # Define the auxiliary function to help with the calculations
+        def aux_crps(mu, sigma_2):
+            first_term = 2 * np.sqrt(sigma_2) * norm.pdf( mu/np.sqrt(sigma_2) )
+            sec_term = mu * (2 * norm.cdf( mu/np.sqrt(sigma_2) ) - 1)
+            aux_term = first_term + sec_term
+
+            return aux_term
+
+        # Estimate the differences between means and variances for each sample, batch-wise
+        res_var = res_std ** 2
+        crps_exact = np.empty([ shape_quad[0] ])
+
+        for i in range(shape_quad[0]):
+            means_vec = res_mean[i, :]
+            vars_vec = res_var[i, :]
+
+            means_diff = np.empty([shape_quad[1], shape_quad[1]])
+            vars_sum = np.empty([shape_quad[1], shape_quad[1]])
+            ru, cu = np.triu_indices(means_vec.size,1)
+            rl, cl = np.tril_indices(means_vec.size,1)
+
+            means_diff[ru, cu] = means_vec[ru] - means_vec[cu]
+            means_diff[rl, cl] = means_vec[rl] - means_vec[cl]
+            vars_sum[ru, cu] = vars_vec[ru] + vars_vec[cu]
+            vars_sum[rl, cl] = vars_vec[rl] + vars_vec[cl]
+
+            # Term only depending on the means and vars
+            fixed_term = 1 / 2 * np.mean(aux_crps(means_diff, vars_sum))
+
+            # Term that depends on the real value of the data
+            dev_mean = labels[i, 0] - means_vec
+            data_term = np.mean(aux_crps(dev_mean, vars_vec))
+
+            crps_exact[i] = data_term - fixed_term
+
+        mean_crps_exact = np.mean(crps_exact)
+
+        np.savetxt('res_bim/' + str(alpha_2) + "raw_exact_CRPS.txt", crps_exact)
+        np.savetxt('res_bim/' + str(alpha_2) + "mean_exact_CRPS.txt", [ mean_crps_exact ])
+
+        # We do the test evaluation of RMSE and LL
         SE = 0.0
-        for i in range(int(np.ceil(X_test.shape[ 0 ] / n_batch))):
-
-            last_point = np.minimum(n_batch * (i + 1), X_test.shape[ 0 ])
-
-            batch = [ X_test[ i * n_batch : last_point, : ] , y_test[ i * n_batch : last_point, ] ]
-
-            SE += sess.run(squared_error, feed_dict={x: batch[0], y_: batch[1]}) / batch[ 0 ].shape[ 0 ]
-
-        RMSE = np.sqrt(SE / int(np.ceil(X_test.shape[ 0 ] / n_batch)))
-
-        print('RMSE %g' % RMSE)
-
-        # We do the test evaluation RMSE
-
         LL = 0.0
         for i in range(int(np.ceil(X_test.shape[ 0 ] / n_batch))):
 
@@ -557,11 +604,18 @@ def main(alpha, alpha_2, layers):
 
             batch = [ X_test[ i * n_batch : last_point, : ] , y_test[ i * n_batch : last_point, ] ]
 
-            LL += sess.run(log_prob_data_test, feed_dict={x: batch[0], y_: batch[1]}) / batch[ 0 ].shape[ 0 ]
+            SEtemp, LLtemp = sess.run([ squared_error, log_prob_data_test ], feed_dict={x: batch[0], y_: batch[1]}) #, ladder: ladder_value})
 
+            SE += SEtemp / batch[ 0 ].shape[ 0 ]
+            LL += LLtemp / batch[ 0 ].shape[ 0 ]
+
+        RMSE = np.sqrt(SE / int(np.ceil(X_test.shape[ 0 ] / n_batch)))
         TestLL = (LL / int(np.ceil(X_test.shape[ 0 ] / n_batch)))
 
         print('Test log. likelihood %g' % TestLL)
+        print('RMSE %g' % RMSE)
+        print('CRPS %g' % mean_crps_exact)
+
 
         np.savetxt('res_bim/' + str(alpha_2) + 'results_rmse.txt', [ RMSE ])
         np.savetxt('res_bim/' + str(alpha_2) + 'results_ll.txt', [ TestLL ])
@@ -585,6 +639,6 @@ if __name__ == '__main__':
     # split = int(sys.argv[1])
     alpha = float(sys.argv[1])
     alpha_2 = float(sys.argv[2])
-    layers = int(sys.argv[3])
+    layers = 2 # int(sys.argv[3])
 
     main(alpha, alpha_2, layers)

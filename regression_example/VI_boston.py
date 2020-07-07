@@ -20,7 +20,9 @@ from datetime import datetime
 
 import tensorflow as tf
 import numpy as np
-import pandas as pd
+from _crps import crps_ensemble, crps_quadrature
+# from properscoring import crps_ensemble, crps_quadrature
+from scipy.stats import norm
 
 import os
 os.chdir(".")
@@ -37,7 +39,7 @@ original_file = sys.argv[ 3 ]
 total_training_data = 1.0
 n_batch = 10
 n_epochs = 2000
-ladder_limit = int( n_epochs / 10 )
+ladder_limit =  int( n_epochs / 10 )
 
 mean_targets = 0.0
 std_targets = 1.0
@@ -188,7 +190,12 @@ def exp_log_likelihood(mean_targets, std_targets, weights_train, weights_test):
 
     squared_error = tf.reduce_sum((tf.reduce_mean(A2_test, axis = [ 1 ]) * std_targets + mean_targets - y_ )**2)
 
-    return res_train, [ log_sigma2_noise, bias_A1, bias_A2 ], squared_error, log_prob_data_test #, #neg_lower_bound, log_prob_data_test, squared_error, KL
+
+    pre_noise = tf.random_normal(shape = [ tf.shape(x)[0], samples_test ], seed = 123)*tf.exp(log_sigma2_noise)
+    y_test_pre  = pre_noise + A2_test[:,:,0]
+    y_test = y_test_pre * std_targets + mean_targets
+
+    return res_train, [ log_sigma2_noise, bias_A1, bias_A2 ], squared_error, log_prob_data_test, y_test,  A2_test[:,:,0]*std_targets + mean_targets, pre_noise*std_targets
 
 
 
@@ -261,10 +268,11 @@ def exp_log_likelihood_double(mean_targets, std_targets, weights_train, weights_
 
     squared_error = tf.reduce_sum((tf.reduce_mean(A3_test, axis = [ 1 ]) * std_targets + mean_targets - y_ )**2)
 
-    y_test_pre  = tf.random_normal(shape = [ tf.shape(x)[0], samples_test ], seed = 123)*tf.exp(log_sigma2_noise) + A3_test[:,:,0]
+    pre_noise = tf.random_normal(shape = [ tf.shape(x)[0], samples_test ], seed = 123)*tf.exp(log_sigma2_noise)
+    y_test_pre  = pre_noise + A3_test[:,:,0]
     y_test = y_test_pre * std_targets + mean_targets
 
-    return res_train, [ log_sigma2_noise, bias_A1, bias_A2, bias_A3 ], squared_error, log_prob_data_test
+    return res_train, [ log_sigma2_noise, bias_A1, bias_A2, bias_A3 ], squared_error, log_prob_data_test, y_test, A3_test[:,:,0]*std_targets + mean_targets, pre_noise*std_targets
 
 
 
@@ -332,9 +340,9 @@ def main(permutation, split, layers):
 
     # Call the main network to calculate the metrics
     if layers == 1:
-        res_train, vars_network, squared_error, log_prob_data_test = exp_log_likelihood(mean_targets, std_targets, weights_train, weights_test) # main loss in the VAE
+        res_train, vars_network, squared_error, log_prob_data_test, unnorm_results, results_mean, results_std = exp_log_likelihood(mean_targets, std_targets, weights_train, weights_test) # main loss in the VAE
     elif layers == 2:
-        res_train, vars_network, squared_error, log_prob_data_test = exp_log_likelihood_double(mean_targets, std_targets, weights_train, weights_test) # main loss in the VAE
+        res_train, vars_network, squared_error, log_prob_data_test, unnorm_results, results_mean, results_std = exp_log_likelihood_double(mean_targets, std_targets, weights_train, weights_test) # main loss in the VAE
 
     log_vars_prior = w_variable_variance([ 1 ])
 
@@ -379,6 +387,7 @@ def main(permutation, split, layers):
             y_train = y_train[ permutation, : ]
 
             L = 0.0
+            kl = 0.0
 
             ini = time.clock()
             ini_ref = time.time()
@@ -397,53 +406,135 @@ def main(permutation, split, layers):
 
                 sess.run(train_step_primal, feed_dict={x: batch[0], y_: batch[1], ladder: ladder_value})
 
-                value = sess.run(mean_ELBO, feed_dict={x: batch[0], y_: batch[1], ladder: ladder_value})
-                kl = sess.run(mean_KL, feed_dict={x: batch[0], y_: batch[1], ladder: ladder_value})
+                value, kltemp = sess.run([ mean_ELBO, mean_KL ] , feed_dict={x: batch[0], y_: batch[1], ladder: ladder_value})
                 L += value
+                kl += kltemp
 
             fini = time.clock()
             fini_ref = time.time()
 
             # Store the training results while running
-            with open("prints/prints_VI_boston/results_vi_" + str(split) + "_" +  original_file, "a") as res_file:
+            with open("prints/prints_VI/results_vi_" + str(split) + "_" +  original_file, "a") as res_file:
                res_file.write('VI datetime %s epoch %d ELBO %g KL %g real_time %g cpu_train_time %g ladder_factor %g' % (str(datetime.now()), epoch, L, kl, (fini_ref - ini_ref), (fini - ini), ladder_value) + "\n")
 
             timing.append(fini-ini)
             tmp_kl.append(kl)
             tmp_elbo.append(L)
 
-        # We do the test evaluation RMSE
+        # We do the test evaluation of both RMSE and LL
         SE = 0.0
+        LL = 0.0
         for i in range(int(np.ceil(X_test.shape[ 0 ] / n_batch))):
 
             last_point = np.minimum(n_batch * (i + 1), X_test.shape[ 0 ])
 
             batch = [ X_test[ i * n_batch : last_point, : ] , y_test[ i * n_batch : last_point, ] ]
 
-            SE += sess.run(squared_error, feed_dict={x: batch[0], y_: batch[1], ladder: ladder_value}) / batch[ 0 ].shape[ 0 ]
+            SEtemp, LLtemp = sess.run([ squared_error, log_prob_data_test ], feed_dict={x: batch[0], y_: batch[1], ladder: ladder_value})
+            SE += SEtemp / batch[ 0 ].shape[ 0 ]
+            LL += LLtemp / batch[ 0 ].shape[ 0 ]
 
         RMSE = np.sqrt(SE / int(np.ceil(X_test.shape[ 0 ] / n_batch)))
-
-        # We do the test evaluation RMSE
-        LL = 0.0
-        for j in range(int(np.ceil(X_test.shape[ 0 ] / n_batch))):
-
-            last_point = np.minimum(n_batch * (j + 1), X_test.shape[ 0 ])
-
-            batch = [ X_test[ j * n_batch : last_point, : ] , y_test[ j * n_batch : last_point, ] ]
-
-            LL += sess.run(log_prob_data_test, feed_dict={x: batch[0], y_: batch[1], ladder: ladder_value}) / batch[ 0 ].shape[ 0 ]
-
         TestLL = (LL / int(np.ceil(X_test.shape[ 0 ] / n_batch)))
 
-        with open("prints/prints_VI_boston/results_vi_" + str(split) + "_" +  original_file, "a") as res_file:
+
+        # Make the estimate for the CRPS
+        original_input, results, labels = sess.run([x, unnorm_results, y_], feed_dict={x: X_test, y_: y_test, ladder: ladder_value})
+
+        # np.savetxt('results_VI/x_test_' + str(split) + ".csv", original_input, delimiter = ",")
+        # np.savetxt('results_VI/y_test_' + str(split) + ".csv", labels, delimiter = ",")
+        # np.savetxt('results_VI/y_estimates_' + str(split) + ".csv", results, delimiter = ",")
+
+        # Estimate and save the CRPS using the ensemble method for each test value
+        crps_raw = np.empty(len(labels))
+        for i in range(len(labels)): crps_raw[i] = crps_ensemble(labels[i,0], results[i,:])
+        mean_crps = np.mean(crps_raw)
+
+        np.savetxt('results_VI/raw_CRPS_' + str(split) + ".txt", crps_raw)
+        np.savetxt('results_VI/mean_CRPS_' + str(split) + ".txt", [ mean_crps ])
+
+        res_mean, res_std = sess.run([results_mean, results_std], feed_dict={x: X_test, y_: y_test, ladder: ladder_value})
+
+        np.savetxt('results_VI/res_std__' + str(split) + ".csv", res_mean, delimiter = ",")
+        np.savetxt('results_VI/res_mean_' + str(split) + ".csv", res_std, delimiter = ",")
+
+        ###########################################
+        # Exact CRPS for the mixture of gaussians #
+        ###########################################
+
+        shape_quad = res_mean.shape
+
+        # Define the auxiliary function to help with the calculations
+        def aux_crps(mu, sigma_2):
+            first_term = 2 * np.sqrt(sigma_2) * norm.pdf( mu/np.sqrt(sigma_2) )
+            sec_term = mu * (2 * norm.cdf( mu/np.sqrt(sigma_2) ) - 1)
+            aux_term = first_term + sec_term
+
+            return aux_term
+
+        # Estimate the differences between means and variances for each sample, batch-wise
+        res_var = res_std ** 2
+        crps_exact = np.empty([ shape_quad[0] ])
+
+        for i in range(shape_quad[0]):
+            means_vec = res_mean[i, :]
+            vars_vec = res_var[i, :]
+
+            means_diff = np.empty([shape_quad[1], shape_quad[1]])
+            vars_sum = np.empty([shape_quad[1], shape_quad[1]])
+            ru, cu = np.triu_indices(means_vec.size,1)
+            rl, cl = np.tril_indices(means_vec.size,1)
+
+            means_diff[ru, cu] = means_vec[ru] - means_vec[cu]
+            means_diff[rl, cl] = means_vec[rl] - means_vec[cl]
+            vars_sum[ru, cu] = vars_vec[ru] + vars_vec[cu]
+            vars_sum[rl, cl] = vars_vec[rl] + vars_vec[cl]
+
+            # Term only depending on the means and vars
+            fixed_term = 1 / 2 * np.mean(aux_crps(means_diff, vars_sum))
+
+            # Term that depends on the real value of the data
+            dev_mean = labels[i, 0] - means_vec
+            data_term = np.mean(aux_crps(dev_mean, vars_vec))
+
+            crps_exact[i] = data_term - fixed_term
+
+        mean_crps_exact = np.mean(crps_exact)
+
+        np.savetxt('results_VI/raw_exact_CRPS_' + str(split) + ".txt", crps_exact)
+        np.savetxt('results_VI/mean_exact_CRPS_' + str(split) + ".txt", [ mean_crps_exact ])
+
+        ######################
+        # CRPS by quadrature #
+        ######################
+
+        # crps_quad_raw = np.empty( shape_quad[0] )
+        # for i in range(shape_quad[0]):
+
+        #    def mix_norm_cdf(x):
+        #           mcdf = 0.0
+        #           for j in range(shape_quad[1]):
+        #               mcdf += norm.cdf(x, loc=res_mean[ i,j ], scale= np.abs(res_std[ i,j ])) / (shape_quad[1])
+        #           return mcdf
+        #    crps_quad_raw[ i ] = crps_quadrature(labels[ i,0 ], mix_norm_cdf, xmin = -np.inf, xmax = np.inf, tol = 1e-3 )
+
+        # Estimate the mean of the results by quadrature
+        #mean_crps_quad = np.mean(crps_quad_raw)
+
+        #np.savetxt('results_AADM/' + str(alpha) + 'raw_quad_CRPS_' + str(split) + ".txt", crps_quad_raw)
+        #np.savetxt('results_AADM/' + str(alpha) + 'mean_quad_CRPS_' + str(split) + ".txt", [ mean_crps_quad ])
+
+
+
+        # Export results of the other metrics
+        with open("prints/prints_VI/results_vi_" + str(split) + "_" +  original_file, "a") as res_file:
            res_file.write('VI RMSE %g LL %g' % (RMSE, TestLL) + "\n")
 
-        np.savetxt('results_VI_boston/results_rmse_' + str(split) + '.txt', [ RMSE ])
-        np.savetxt('results_VI_boston/results_ll_' + str(split) + '.txt', [ TestLL ])
-        np.savetxt('results_VI_boston/results_time_' + str(split) + '.txt', [ timing ])
-        np.savetxt('results_VI_boston/results_KL_' + str(split) + '.txt', [ tmp_kl ])
-        np.savetxt('results_VI_boston/results_ELBO_' + str(split) + '.txt', [ tmp_elbo ])
+        np.savetxt('results_VI/results_rmse_' + str(split) + '.txt', [ RMSE ])
+        np.savetxt('results_VI/results_ll_' + str(split) + '.txt', [ TestLL ])
+        np.savetxt('results_VI/results_time_' + str(split) + '.txt', [ timing ])
+        np.savetxt('results_VI/results_KL_' + str(split) + '.txt', [ tmp_kl ])
+        np.savetxt('results_VI/results_ELBO_' + str(split) + '.txt', [ tmp_elbo ])
 
 
 
@@ -458,16 +549,17 @@ if __name__ == '__main__':
     if not os.path.isdir("prints"):
         os.makedirs("prints")
 
-    if not os.path.isdir("prints/prints_VI_boston"):
-        os.makedirs("prints/prints_VI_boston")
+    if not os.path.isdir("prints/prints_VI"):
+        os.makedirs("prints/prints_VI")
 
     # Create the storage folder
-    if not os.path.isdir("results_VI_boston"):
-        os.makedirs("results_VI_boston")
+    if not os.path.isdir("results_VI"):
+        os.makedirs("results_VI")
 
     # Create (or empty) the results of the run
-    if os.path.isfile("prints/prints_VI_boston/results_vi_" + str(split) + "_" +  original_file):
-        with open("prints/prints_VI_boston/results_vi_" +  str(split) + "_" +  original_file, "w") as res_file:
+    if os.path.isfile("prints/prints_VI/results_vi_" + str(split) + "_" +  original_file):
+        with open("prints/prints_VI/results_vi_" +  str(split) + "_" +  original_file, "w") as res_file:
            res_file.close()
 
     main(available_perm[split,], split, layers)
+

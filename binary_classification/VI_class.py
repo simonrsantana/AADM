@@ -14,6 +14,8 @@ from datetime import datetime
 
 import tensorflow as tf
 import numpy as np
+# from properscoring import brier_score
+from _brier import brier_score
 
 import os
 os.chdir(".")
@@ -34,7 +36,7 @@ n_samples_train = 10
 n_samples_test = 100
 
 n_batch = 10
-n_epochs = 3000 
+n_epochs = 4000
 
 # Structural parameters of the main NN
 
@@ -145,7 +147,9 @@ def compute_outputs_main_NN(network, x_input, y_target, weights, n_samples, dim_
 
     error = tf.reduce_sum(tf.math.abs(tf.math.round(tf.reduce_mean(tf.math.sigmoid(A3), axis = [ 1 ])) - y_target))
 
-    return res_train, error, log_prob_data
+    y_test = tf.math.sigmoid(A3)[:,:,0]
+
+    return res_train, error, log_prob_data, y_test
 
 ###############################################################################
 ###############################################################################
@@ -209,7 +213,7 @@ def main(permutation, split, layers):
 
     if n_layers_nn == 2:
         total_weights = n_units_nn * (dim_data + n_units_nn) + n_units_nn # Number of weights for the 2 hidden layers case
-    else: 
+    else:
         total_weights = (dim_data + 1) * n_units_nn  # Total number of weights used
 
     generator = create_generator(total_weights)
@@ -223,9 +227,9 @@ def main(permutation, split, layers):
         (0.0 - generator[ 'mean_noise' ])**2 / tf.exp(main_NN['log_vars_prior']) - 1.0 + main_NN['log_vars_prior'] \
         - generator[ 'log_var_noise' ])
 
-    res_train, error, log_prob_data = compute_outputs_main_NN(main_NN, x, y_, weights, \
+    res_train, error, log_prob_data, forecasted_classes = compute_outputs_main_NN(main_NN, x, y_, weights, \
         n_samples, dim_data)
- 
+
     # Make the estimates of the ELBO for the primary classifier
 
     ELBO = (tf.reduce_sum(res_train) - kl_factor_ * tf.reduce_mean(KL) * tf.cast(tf.shape(x)[ 0 ], tf.float32) / \
@@ -277,7 +281,7 @@ def main(permutation, split, layers):
 
                 sess.run(train_step_primal, feed_dict={x: batch[ 0 ], y_: batch[ 1 ], n_samples: n_samples_train, \
                     kl_factor_: kl_factor})
-                
+
                 L += sess.run(mean_ELBO, feed_dict={x: batch[ 0 ], y_: batch[ 1 ], n_samples: n_samples_train, \
                     kl_factor_: kl_factor})
                 kl += sess.run(mean_KL, feed_dict={x: batch[ 0 ], y_: batch[ 1 ], n_samples: n_samples_train})
@@ -286,49 +290,64 @@ def main(permutation, split, layers):
                 sys.stdout.flush()
 
                 fini_train = time.clock()
+                fini_ref = time.time()
 
-            # Test Evaluation 
 
-            sys.stdout.write('\n')
-            ini_test = time.time()
-
-            # We do the test evaluation RMSE
-
-            errors = 0.0
-            LL  = 0.0
-            n_batches_to_process = int(np.ceil(X_test.shape[ 0 ] / n_batch))
-            for i in range(n_batches_to_process):
-
-                last_point = np.minimum(n_batch * (i + 1), X_test.shape[ 0 ])
-
-                batch = [ X_test[ i * n_batch : last_point, : ] , y_test[ i * n_batch : last_point, ] ]
-
-                errors += sess.run(error, feed_dict={x: batch[0], y_: batch[1], n_samples: n_samples_test})
-                LL += sess.run(log_prob_data, feed_dict={x: batch[ 0 ], y_: batch[ 1 ], n_samples: n_samples_test})
-
-            error_class = errors / float(X_test.shape[ 0 ])
-            TestLL = (LL / float(X_test.shape[ 0 ]))
-
-            fini_test = time.time()
-            fini = time.clock()
-            fini_ref = time.time()
-            total_fini = time.time()
-        
-            string = ('batch %g datetime %s epoch %d ELBO %g KL %g real_time %g cpu_time %g ' + \
-                'train_time %g test_time %g total_time %g KL_factor %g LL %g Error %g') % \
+            string = ('VI - batch %g datetime %s epoch %d ELBO %g CROSS-ENT %g KL %g cpu_time %g ' + \
+                'train_time %g KL_factor %g') % \
                 (i_batch, str(datetime.now()), epoch, \
-                L / n_batches_train, kl / n_batches_train, (fini_ref - \
-                ini_ref), (fini - ini), (fini_train - ini_train), (fini_test - ini_test), (total_fini - total_ini), \
-                kl_factor, TestLL, error_class)
+                L / n_batches_train, ce_estimate / n_batches_train, kl / n_batches_train, (fini_ref - \
+                ini_ref), (fini_train - ini_train), kl_factor)
             print(string)
             sys.stdout.flush()
-            
-            L = 0.0
-            ce_estimate = 0.0
-            kl = 0.0
+
+        # Test Evaluation
+
+        sys.stdout.write('\n')
+        ini_test = time.time()
+
+        # We do the test evaluation RMSE
+
+        errors = 0.0
+        LL  = 0.0
+        n_batches_to_process = int(np.ceil(X_test.shape[ 0 ] / n_batch))
+        for i in range(n_batches_to_process):
+
+            last_point = np.minimum(n_batch * (i + 1), X_test.shape[ 0 ])
+
+            batch = [ X_test[ i * n_batch : last_point, : ] , y_test[ i * n_batch : last_point, ] ]
+
+            errors_tmp, LL_tmp = sess.run([error, log_prob_data], feed_dict={x: batch[0], y_: batch[1], n_samples: n_samples_test})
+            errors += errors_tmp
+            LL += LL_tmp
+
+        error_class = errors / float(X_test.shape[ 0 ])
+        TestLL = (LL / float(X_test.shape[ 0 ]))
+
+        # Estimate the Brier score for the binary classification
+        results, labels = sess.run([forecasted_classes, y_], feed_dict={x: X_test, y_: y_test, n_samples: n_samples_test})
+
+        raw_brier_results = brier_score(labels.T, np.mean(results, axis = 1))
+        mean_brier_results = np.mean(raw_brier_results)
+
+        fini_test = time.time()
+        fini = time.clock()
+        total_fini = time.time()
+
+        string = ('VI - batch %g datetime %s epoch %d ELBO %g CROSS-ENT %g KL %g real_time %g cpu_time %g ' + \
+            'train_time %g test_time %g total_time %g KL_factor %g LL %g Error %g') % \
+            (i_batch, str(datetime.now()), epoch, \
+            L / n_batches_train, ce_estimate / n_batches_train, kl / n_batches_train, (fini_ref - \
+            ini_ref), (fini - ini), (fini_train - ini_train), (fini_test - ini_test), (total_fini - total_ini), \
+            kl_factor, TestLL, error_class)
+        print(string)
+        sys.stdout.flush()
 
         np.savetxt('res_vi/results_error_' + str(split) + '.txt', [ error_class ])
         np.savetxt('res_vi/results_ll_' + str(split) + '.txt', [ TestLL ])
+        np.savetxt('res_vi/results_raw_Brier_' + str(split) + '.txt', raw_brier_results)
+        np.savetxt('res_vi/results_mean_Brier_' + str(split) + '.txt', [ mean_brier_results ])
+
 
 
 if __name__ == '__main__':
@@ -344,3 +363,5 @@ if __name__ == '__main__':
 
 
     main(available_perm[split,], split, layers)
+
+

@@ -1,5 +1,5 @@
 ###############################################################################
-############## ADVERSARIAL VARIATIONAL BAYES ALGORITHM WITH NNs ###############
+#################### ADVERSARIAL VARIARIOTNAL BAYES METHOD ####################
 ###############################################################################
 #
 # This code performs AVB in the Airlines Delay dataset, testing the convergence
@@ -8,16 +8,21 @@
 ###############################################################################
 ###############################################################################
 
-
 # Import the relevant packages
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+seed = 123
+
 import argparse
 import sys
 import time
 from datetime import datetime
+# from properscoring import crps_ensemble
+#from _crps import crps_ensemble, crps_quadrature
+from scipy.stats import norm
+
 
 import tensorflow as tf
 import numpy as np
@@ -30,370 +35,231 @@ os.chdir(".")
 # =============================================================================
 
 # File to be analyzed
-original_file = "shuffle_airlines.npy"
+
+original_file = "shuffle_airplanes.npy"
 
 # This is the total number of training samples
-total_training_data = 1.0
+
+n_samples_train = 10
+n_samples_test = 100
+
 n_batch = 100
-n_epochs = 50 # We do not expect the algorithm to fulfill more than a few epochs before it reaches convergence
+n_epochs = 1000 # We do not expect the algorithm to fulfill more than a few epochs before it reaches convergence
 n_size_test = 10000
-sampling_batches = 100
-
-mean_targets = 0.0
-std_targets = 1.0
-
-# Number of samples for the weights in each layer
-samples_train = 10
-samples_test = 100
+n_batches_to_report = 1000
 
 # Structural parameters of the main NN
-dim_data = 8
-n_units = 50
-n_units_sec = 50    # For the case with 2 hidden layers
-total_number_weights = (dim_data + 1) * n_units  # Total number of weights used
-total_number_weights_double = n_units * (dim_data + n_units_sec) + n_units_sec  # Number of weights for the 2 hidden layers case
 
-# Parameters for the generator network
+n_units_nn = 50
+n_layers_nn = 2  # Number of layers in the NN
+
+n_layers_gen = 2          # Number of layers in the generator
 n_units_gen = 50          # Number of units in the generator for 1 hidden layer in the VAE
-n_units_gen_2 = 50
-n_units_gen_double = 50   # Number of units in the generator for 2 hidden layers in the VAE
-n_units_gen_double_2 = 50
 noise_comps_gen = 100     # Number of gaussian variables inputed in the encoder
 
 # Parameters for the discriminative network
+
 n_units_disc = 50
-n_units_disc_2 = 50
+n_layers_disc = 2
 
-# Learning ratios
-primal_rate = 1e-5
-dual_rate = 1e-4
+# Learning rates
 
-# Create the model
-x = tf.placeholder(tf.float32, [ None, dim_data ])
-
-# Define loss and optimizer
-y_ = tf.placeholder(tf.float32, [ None, 1 ])
-
+primal_rate = 1e-5 # Actual Bayesian NN
+dual_rate = 1e-4   # Discriminator
 
 # We define the following two functions to simplify the rest of the code
+
 def w_variable_mean(shape):
-  initial = tf.random_normal(shape = shape, stddev = 0.1, seed = 123) # mean 0 stddev 1
+  initial = tf.random_normal(shape = shape, stddev = 0.1, seed = seed) # mean 0 stddev 1
   return tf.Variable(initial)
 
 def w_variable_variance(shape):
-  initial = tf.random_normal(shape = shape, stddev = 0.1, seed = 123) - 5.0 # mean 0 stddev 1
+  initial = tf.random_normal(shape = shape, stddev = 0.1, seed = seed) - 5.0 # mean 0 stddev 1
   return tf.Variable(initial)
 
 
+# Define the auxiliary function to help with the calculations
+def aux_crps(mu, sigma_2):
+    first_term = 2 * np.sqrt(sigma_2) * norm.pdf( mu/np.sqrt(sigma_2) )
+    sec_term = mu * (2 * norm.cdf( mu/np.sqrt(sigma_2) ) - 1)
+    aux_term = first_term + sec_term
+
+    return aux_term
+
 ###############################################################################
 ##########################   Network structure  ###############################
-###############################################################################
+##############################################################################a
 
-# =============================================================================
-#  (Encoder) Deterministic NN that generates the weights
-# =============================================================================
-
-##############################
-# Case with one hidden layer #
-##############################
-
-
-def generate_weights(batchsize, samples_train, samples_test):
-
-    # Inputs
-    # batchsize :   Dimension of the batch of data we are going to apply the weights to
-    # samples   :   Number of samples of the weights required
-    #
-
-    # Initialize the random gaussian noises to input the network
-
-    pre_init_noise_train  = tf.random_normal(shape = [ batchsize, samples_train, noise_comps_gen ], seed = 123)
-    pre_init_noise_test = tf.random_normal(shape = [ batchsize, samples_test, noise_comps_gen ], seed = 123)
+def create_generator(n_units_gen, noise_comps_gen, total_number_weights, n_layers_gen):
 
     mean_noise = w_variable_mean([ 1, 1, noise_comps_gen ])
     log_var_noise = w_variable_variance([ 1, 1, noise_comps_gen ])
 
-    init_noise_train =  mean_noise + tf.sqrt(tf.exp( log_var_noise )) * pre_init_noise_train
-    init_noise_test = mean_noise + tf.sqrt(tf.exp( log_var_noise )) * pre_init_noise_test
-
-    #Process the noises through the network
     W1_gen = w_variable_mean([ noise_comps_gen, n_units_gen ])
     bias1_gen  = w_variable_mean([ n_units_gen ])
 
-    A1_gen_train = tf.tensordot(init_noise_train, W1_gen, axes = [[2], [0]]) + bias1_gen
-    A1_gen_test = tf.tensordot(init_noise_test, W1_gen, axes = [[2], [0]]) + bias1_gen
+    W2_gen = w_variable_mean([ n_units_gen, n_units_gen ])
+    bias2_gen  = w_variable_mean([ n_units_gen ])
 
-    # Results for the first layer
-    h1_gen_train = tf.nn.leaky_relu(A1_gen_train)
-    h1_gen_test = tf.nn.leaky_relu(A1_gen_test)
-
-    # Variables for the inner layer
-    W2_gen = w_variable_mean([ n_units_gen, n_units_gen_2 ])
-    bias2_gen  = w_variable_mean([ n_units_gen_2 ])
-
-    A2_gen_train = tf.tensordot(h1_gen_train, W2_gen, axes = [[2], [0]]) + bias2_gen
-    A2_gen_test = tf.tensordot(h1_gen_test, W2_gen, axes = [[2], [0]]) + bias2_gen
-
-
-    # Results for the second layer
-    h2_gen_train = tf.nn.leaky_relu(A2_gen_train)
-    h2_gen_test = tf.nn.leaky_relu(A2_gen_test)
-
-    # Output the weights
-    W3_gen = w_variable_mean([ n_units_gen_2, total_number_weights])
+    W3_gen = w_variable_mean([ n_units_gen, total_number_weights ])
     bias3_gen  = w_variable_mean([ total_number_weights ])
 
-    A3_gen_train = tf.tensordot(h2_gen_train, W3_gen, axes = [[2], [0]]) + bias3_gen    # final weights
-    A3_gen_test = tf.tensordot(h2_gen_test, W3_gen, axes = [[2], [0]]) + bias3_gen    # final weights
+    return {'mean_noise': mean_noise, 'log_var_noise': log_var_noise, 'W1_gen': W1_gen, 'bias1_gen': bias1_gen, \
+        'W2_gen': W2_gen, 'bias2_gen': bias2_gen, 'W3_gen': W3_gen, 'bias3_gen': bias3_gen, 'n_layers_gen': n_layers_gen}
 
-    return A3_gen_train, A3_gen_test, [ W1_gen, bias1_gen, W2_gen, bias2_gen, W3_gen, bias3_gen, mean_noise, log_var_noise] #, init_noise_train, init_noise_test ]
+def get_variables_generator(generator):
+    return [ generator['mean_noise'], generator['log_var_noise'], generator['W1_gen'], \
+        generator['W2_gen'], generator['W3_gen'], generator['bias1_gen'], generator['bias2_gen'], generator['bias3_gen'] ]
 
-###############################
-# Case with two hidden layers #
-###############################
+def compute_output_generator(generator, batchsize, n_samples, noise_comps_gen):
 
-def generate_weights_double(batchsize, samples_train, samples_test):
+    mean_noise = generator['mean_noise']
+    log_var_noise = generator['log_var_noise']
+    W1_gen = generator['W1_gen']
+    W2_gen = generator['W2_gen']
+    W3_gen = generator['W3_gen']
 
-    # Inputs
-    # batchsize :   Dimension of the batch of data we are going to apply the weights to
-    # samples   :   Number of samples of the weights required
-    #
+    bias1_gen = generator['bias1_gen']
+    bias2_gen = generator['bias2_gen']
+    bias3_gen = generator['bias3_gen']
 
-    # Initialize the random gaussian noises to input the network
-    pre_init_noise_train  = tf.random_normal(shape = [ batchsize, samples_train, noise_comps_gen ], seed = 123)
-    pre_init_noise_test = tf.random_normal(shape = [ batchsize, samples_test, noise_comps_gen ], seed = 123)
+    pre_init_noise = tf.random_normal(shape = [ batchsize, n_samples, noise_comps_gen ], seed = seed)
 
-    mean_noise = w_variable_mean([ 1, 1, noise_comps_gen ])
-    log_var_noise = w_variable_variance([ 1, 1, noise_comps_gen ])
-
-    init_noise_train =  mean_noise + tf.sqrt(tf.exp( log_var_noise )) * pre_init_noise_train
-    init_noise_test = mean_noise + tf.sqrt(tf.exp( log_var_noise )) * pre_init_noise_test
+    init_noise =  mean_noise + tf.sqrt(tf.exp( log_var_noise )) * pre_init_noise
 
     # Process the noises through the network
-    W1_gen = w_variable_mean([ noise_comps_gen, n_units_gen_double ])
-    bias1_gen  = w_variable_mean([ n_units_gen_double ])
 
-    A1_gen_train = tf.tensordot(init_noise_train, W1_gen, axes = [[2], [0]]) + bias1_gen
-    A1_gen_test = tf.tensordot(init_noise_test, W1_gen, axes = [[2], [0]]) + bias1_gen
+    A1_gen = tf.tensordot(init_noise, W1_gen, axes = [[2], [0]]) + bias1_gen
+    h1_gen = tf.nn.leaky_relu(A1_gen)
 
-    # Results for the layer
-    h1_gen_train = tf.nn.leaky_relu(A1_gen_train)
-    h1_gen_test = tf.nn.leaky_relu(A1_gen_test)
+    if generator['n_layers_gen'] == 1:
+        A3_gen = tf.tensordot(h1_gen, W3_gen, axes = [[2], [0]]) + bias3_gen    # final weights
+    else:
+        A2_gen = tf.tensordot(h1_gen, W2_gen, axes = [[2], [0]]) + bias2_gen
+        h2_gen = tf.nn.leaky_relu(A2_gen)
+        A3_gen = tf.tensordot(h2_gen, W3_gen, axes = [[2], [0]]) + bias3_gen    # final weights
 
-    # Output the weights
-    W2_gen = w_variable_mean([ n_units_gen_double, n_units_gen_double_2 ])
-    bias2_gen  = w_variable_mean([ n_units_gen_double_2 ])
+    return A3_gen
 
-    A2_gen_train = tf.tensordot(h1_gen_train, W2_gen, axes = [[2], [0]]) + bias2_gen
-    A2_gen_test = tf.tensordot(h1_gen_test, W2_gen, axes = [[2], [0]]) + bias2_gen
+def create_discriminator(n_units_disc, total_weights, n_layers_disc):
 
-    # Results for the second layer
-    h2_gen_train = tf.nn.leaky_relu(A2_gen_train)
-    h2_gen_test = tf.nn.leaky_relu(A2_gen_test)
+    W1_disc = w_variable_mean([ total_weights, n_units_disc])
+    bias1_disc = w_variable_mean([ n_units_disc ])
 
+    W2_disc = w_variable_mean([ n_units_disc, n_units_disc ])
+    bias2_disc = w_variable_mean([ n_units_disc ])
 
-    # Output the weights
-    W3_gen = w_variable_mean([ n_units_gen_double_2, total_number_weights_double ])
-    bias3_gen  = w_variable_mean([ total_number_weights_double ])
+    W3_disc = w_variable_mean([ n_units_disc ,  1 ])
+    bias3_disc = w_variable_mean([ 1 ])
 
-    A3_gen_train = tf.tensordot(h2_gen_train, W3_gen, axes = [[2], [0]]) + bias3_gen    # final weights
-    A3_gen_test = tf.tensordot(h2_gen_test, W3_gen, axes = [[2], [0]]) + bias3_gen    # final weights
+    return {'W1_disc': W1_disc, 'bias1_disc': bias1_disc, 'W2_disc': W2_disc, \
+        'bias2_disc': bias2_disc, 'W3_disc': W3_disc, 'bias3_disc': bias3_disc, 'n_layers_disc': n_layers_disc,
+        'total_weights': total_weights}
 
-    return A3_gen_train, A3_gen_test, [ W1_gen, bias1_gen, W2_gen, bias2_gen, W3_gen, bias3_gen, mean_noise, log_var_noise] #, init_noise_train, init_noise_test ]
+def get_variables_discriminator(discriminator):
+    return [ discriminator['W1_disc'], discriminator['W2_disc'], discriminator['W3_disc'], discriminator['bias1_disc'], \
+        discriminator['bias2_disc'], discriminator['bias3_disc'] ]
 
-# =============================================================================
-#  (Decoder) Deterministic NN to output the value of T(z,x)
-# =============================================================================
+def compute_output_discriminator(discriminator, weights, n_layers):
 
-def discriminator(norm_weights_train, w_sampled_gaussian, layers):
+    total_weights = discriminator['total_weights']
+    W1_disc = discriminator['W1_disc']
+    W2_disc = discriminator['W2_disc']
+    W3_disc = discriminator['W3_disc']
 
-    # Inputs
-    # weights :     Tensor of rank 4 containing weight samples
+    bias1_disc = discriminator['bias1_disc']
+    bias2_disc = discriminator['bias2_disc']
+    bias3_disc = discriminator['bias3_disc']
 
-    # Input the weights and process them
-    if layers == 1:
-        W1_disc = w_variable_mean([ total_number_weights, n_units_disc ])
-    elif layers == 2:
-        W1_disc = w_variable_mean([ total_number_weights_double, n_units_disc ])
+    A1_disc = tf.tensordot(weights, W1_disc, axes = [[2], [0]]) + bias1_disc
+    h1_disc = tf.nn.leaky_relu(A1_disc)
 
-    bias1_disc  = w_variable_mean([ n_units_disc ])
+    if discriminator['n_layers_disc'] == 2:
+        A2_disc = tf.tensordot(h1_disc, W2_disc, axes = [[2], [0]]) + bias2_disc
+        h2_disc = tf.nn.leaky_relu(A2_disc)
 
-    A1_disc_norm_train = tf.tensordot(norm_weights_train, W1_disc, axes = [[2], [0]]) + bias1_disc
-    A1_disc_gaussian = tf.tensordot(w_sampled_gaussian, W1_disc, axes = [[2], [0]]) + bias1_disc
+        A3_disc = tf.tensordot(h2_disc, W3_disc, axes = [[2], [0]]) + bias3_disc
+    else:
+        A3_disc = tf.tensordot(h1_disc, W3_disc, axes = [[2], [0]]) + bias3_disc
 
-    # Results for the first layer
+    return A3_disc[ :, :, 0 ]
 
-    h1_disc_norm_train = tf.nn.leaky_relu(A1_disc_norm_train)
-    h1_disc_gaussian = tf.nn.leaky_relu(A1_disc_gaussian)
+def create_main_NN(n_units, n_layers):
 
-    # Create the variables for the inner layer
+    # Only the variables of that Network (prior variance and noise variance)
 
-    W2_disc = w_variable_mean([ n_units_disc, n_units_disc_2 ])
-    bias2_disc  = w_variable_mean([ n_units_disc_2 ])
+    log_vars_prior = tf.Variable(tf.cast(np.log(1.0), dtype = tf.float32))
+    log_sigma2_noise = tf.Variable(tf.cast((1.0 / 10.0), dtype = tf.float32))
 
-    A2_disc_norm_train = tf.tensordot(h1_disc_norm_train, W2_disc, axes = [[2], [0]]) + bias2_disc
-    A2_disc_gaussian = tf.tensordot(h1_disc_gaussian, W2_disc, axes = [[2], [0]]) + bias2_disc
-
-    # Results for the inner layer
-
-    h2_disc_norm_train = tf.nn.leaky_relu(A2_disc_norm_train)
-    h2_disc_gaussian = tf.nn.leaky_relu(A2_disc_gaussian)
-
-    # Output the quotients
-
-    W3_disc = w_variable_mean([ n_units_disc_2, 1 ])
-    bias3_disc  = w_variable_mean([ 1 ])
-
-    A3_disc_norm_train = tf.tensordot(h2_disc_norm_train, W3_disc, axes = [[2], [0]]) + bias3_disc
-    A3_disc_gaussian = tf.tensordot(h2_disc_gaussian, W3_disc, axes = [[2], [0]]) + bias3_disc
-
-    return A3_disc_norm_train[ :, :, 0 ], A3_disc_gaussian[ :, :, 0 ], [ W1_disc, bias1_disc, W2_disc, bias2_disc, W3_disc, bias3_disc ]
-
-
-# =============================================================================
-# (VAE) Main network
-# =============================================================================
-
-
-##############################
-# Case with one hidden layer #
-##############################
-
-
-def exp_log_likelihood(mean_targets, std_targets, weights_train, weights_test):
-
-
-    # This is the noise variance
-
-    log_sigma2_noise = tf.Variable(tf.cast(1.0 / 100.0, dtype = tf.float32))
-
-    # Separate the weights and reshape the tensors
-
-    W1_train_re = tf.reshape(weights_train[:,:,:(dim_data * n_units)], shape = [ tf.shape(x)[0], samples_train, n_units, dim_data ])
-    W2_train_re  = tf.reshape(weights_train[:,:,(dim_data * n_units):], shape = [ tf.shape(x)[0], samples_train, n_units, 1 ])
-
-    W1_test_re = tf.reshape(weights_test[:,:,:(dim_data * n_units)], shape = [ tf.shape(x)[0], samples_test, n_units, dim_data ])
-    W2_test_re  = tf.reshape(weights_test[:,:,(dim_data * n_units):], shape = [ tf.shape(x)[0], samples_test, n_units, 1 ])
-
-    #########################
-    #   Processing layer    #
-    #########################
+    # The biases are not random
 
     bias_A1 = w_variable_mean([ n_units ])
+    bias_A2 = w_variable_mean([ n_units ])
+    bias_A3 = w_variable_mean([ 1 ])
 
-    A1 = tf.reduce_sum(tf.reshape(x, shape = [tf.shape(x)[0], 1, 1, dim_data]) * W1_train_re, axis = 3) + bias_A1
-    A1_test = tf.reduce_sum(tf.reshape(x, shape = [tf.shape(x)[0], 1, 1, dim_data]) * W1_test_re, axis = 3) + bias_A1
+    return {'log_vars_prior': log_vars_prior, 'log_sigma2_noise': log_sigma2_noise, \
+        'n_units': n_units, 'bias_A1': bias_A1, 'bias_A2': bias_A2, 'bias_A3': bias_A3, 'n_layers': n_layers}
 
-    # Results of the layer
+def get_variables_main_NN(network):
+    return [ network['log_sigma2_noise'], network['log_vars_prior'], network['bias_A1'], network['bias_A2'], network['bias_A3'] ]
 
-    h1 = tf.nn.leaky_relu(A1)
-    h1_test = tf.nn.leaky_relu(A1_test)
+def compute_outputs_main_NN(network, x_input, y_target, mean_targets, std_targets, weights, n_samples, dim_data):
 
-    ##############################
-    #     Regression output      #
-    ##############################
+    log_vars_prior = network['log_vars_prior']
+    log_sigma2_noise = network['log_sigma2_noise']
+    n_units = network['n_units']
+    bias_A1 = network['bias_A1']
+    bias_A2 = network['bias_A2']
+    bias_A3 = network['bias_A3']
 
-    bias_A2  = w_variable_mean([ 1 ])
+    batch_size = tf.shape(x_input)[ 0 ]
+    W1 = tf.reshape(weights[:,:, : (dim_data * n_units) ], shape = [ batch_size, n_samples, n_units, dim_data ])
 
-    A2 = tf.reduce_sum(tf.reshape(h1, shape = [ tf.shape(x)[0], samples_train, n_units, 1 ]) * W2_train_re, axis = 2) + bias_A2
-    A2_test = tf.reduce_sum(tf.reshape(h1_test, shape = [ tf.shape(x)[0], samples_test, n_units, 1 ]) * W2_test_re, axis = 2) + bias_A2
+    if network['n_layers'] == 2:
+        W2 = tf.reshape(weights[:,:, (dim_data * n_units) : (dim_data * n_units + n_units * n_units) ], \
+        shape = [ batch_size, n_samples, n_units, n_units ])
+    else:
+        W2 = tf.reshape(weights[:,:, (dim_data * n_units) : ], shape = [ batch_size, n_samples, n_units, 1 ])
 
-    res_train = tf.reduce_mean(-0.5 * (np.log(2.0 * np.pi) + log_sigma2_noise + (A2 - tf.reshape(y_, shape = [ tf.shape(x)[0], 1, 1 ]))**2 / tf.exp(log_sigma2_noise)), axis = [ 1 ])
+    W3 = tf.reshape(weights[:,:, (dim_data * n_units + n_units * n_units) : ], shape = [ batch_size, n_samples, n_units, 1 ])
+
+    A1 = tf.reduce_sum(tf.reshape(x_input, shape = [ batch_size, 1, 1, dim_data]) * W1, axis = 3) + bias_A1
+    h1 = tf.nn.leaky_relu(A1) # h1 is batch_size x n_samples x n_units
+
+    if network['n_layers'] == 2:
+        A2 = tf.reduce_sum(tf.reshape(h1, shape = [ batch_size, n_samples, n_units, 1 ]) * W2, axis = 2) + bias_A2
+        h2 = tf.nn.leaky_relu(A2) # h2 is batch_size x n_samples x n_units
+        A3 = tf.reduce_sum(tf.reshape(h2, shape = [ batch_size, n_samples, n_units, 1 ]) * W3, axis = 2) + bias_A3
+    else:
+        A3 = tf.reduce_sum(tf.reshape(h1, shape = [ batch_size, n_samples, n_units, 1 ]) * W2, axis = 2) + bias_A3
+
+    res_train = tf.reduce_mean(-0.5 * (np.log(2.0 * np.pi) + log_sigma2_noise + \
+        (A3 - tf.reshape(y_target, shape = [ tf.shape(x_input)[0], 1, 1 ]))**2 / tf.exp(log_sigma2_noise)), axis = [ 1 ])
+
 
     # This is to compute the test log loglikelihood
 
-    log_prob_data_test = tf.reduce_sum(((tf.reduce_logsumexp(-0.5 * tf.log(2.0 * np.pi * (tf.exp(log_sigma2_noise) * std_targets**2)) \
-        - 0.5 * (A2_test * std_targets + mean_targets - tf.reshape(y_, shape = [ tf.shape(x)[0], 1, 1 ]))**2 / (tf.exp(log_sigma2_noise) * std_targets**2), axis = [ 1 ])) \
-        - np.log(samples_test)))
+    log_prob_data = tf.reduce_sum(((tf.reduce_logsumexp(-0.5 * tf.log(2.0 * np.pi * (tf.exp(log_sigma2_noise) * std_targets**2)) \
+        - 0.5 * (A3 * std_targets + mean_targets - tf.reshape(y_target, shape = \
+        [ tf.shape(x_input)[0], 1, 1 ]))**2 / (tf.exp(log_sigma2_noise) * std_targets**2), axis = [ 1 ])) \
+        - tf.log(tf.cast(n_samples, tf.float32))))
 
-    squared_error = tf.reduce_sum((tf.reduce_mean(A2_test, axis = [ 1 ]) * std_targets + mean_targets - y_ )**2)
+    error = tf.reduce_sum((tf.reduce_mean(A3, axis = [ 1 ]) * std_targets + mean_targets - y_target)**2)
 
-    return res_train, [ log_sigma2_noise, bias_A1, bias_A2 ], squared_error, log_prob_data_test
+    pre_noise = tf.random_normal(shape = [ tf.shape(x_input)[0], n_samples ]) * tf.exp(log_sigma2_noise)
+    y_test_pre  = pre_noise + A3[:,:,0]
+    y_test = y_test_pre * std_targets + mean_targets
 
-
-###############################
-# Case with two hidden layers #
-###############################
-
-
-def exp_log_likelihood_double(mean_targets, std_targets, weights_train, weights_test):
-
-    # This is the noise variance
-
-    log_sigma2_noise = tf.Variable(tf.cast(1.0 / 100.0, dtype = tf.float32))
-
-    # Separate the weights and reshape the tensors
-
-    W1_train_re = tf.reshape(weights_train[:,:,:(dim_data * n_units)], shape = [ tf.shape(x)[0], samples_train, n_units, dim_data ])
-    W2_train_re  = tf.reshape(weights_train[:,:,(dim_data * n_units):(n_units * (n_units_sec + dim_data))], shape = [ tf.shape(x)[0], samples_train, n_units, n_units_sec ])
-    W3_train_re  = tf.reshape(weights_train[:,:,(n_units * (n_units_sec + dim_data)):], shape = [ tf.shape(x)[0], samples_train, n_units_sec, 1 ])
-
-    W1_test_re = tf.reshape(weights_test[:,:,:(dim_data * n_units)], shape = [ tf.shape(x)[0], samples_test, n_units, dim_data ])
-    W2_test_re  = tf.reshape(weights_test[:,:,(dim_data * n_units):(n_units * (n_units_sec + dim_data))], shape = [ tf.shape(x)[0], samples_test, n_units, n_units_sec ])
-    W3_test_re  = tf.reshape(weights_test[:,:,(n_units * (n_units_sec + dim_data)):], shape = [ tf.shape(x)[0], samples_test, n_units_sec, 1 ])
-
-    #############################
-    # First layer of processing #
-    #############################
-
-    bias_A1 = w_variable_mean([ n_units ])
-
-    A1 = tf.reduce_sum(tf.reshape(x, shape = [tf.shape(x)[0], 1, 1, dim_data]) * W1_train_re, axis = 3) + bias_A1
-    A1_test = tf.reduce_sum(tf.reshape(x, shape = [tf.shape(x)[0], 1, 1, dim_data]) * W1_test_re, axis = 3) + bias_A1
-
-    # Results of the layer
-
-    h1 = tf.nn.leaky_relu(A1)
-    h1_test = tf.nn.leaky_relu(A1_test)
-
-    #######################
-    # Second hidden layer #
-    #######################
-
-    bias_A2  = w_variable_mean([ n_units_sec ])
-
-    A2 = tf.reduce_sum(tf.reshape(h1, shape = [ tf.shape(x)[0], samples_train, n_units, 1 ]) * W2_train_re, axis = 2) + bias_A2
-    A2_test = tf.reduce_sum(tf.reshape(h1_test, shape = [ tf.shape(x)[0], samples_test, n_units, 1 ]) * W2_test_re, axis = 2) + bias_A2
-
-    # Results of the layer
-
-    h2 = tf.nn.leaky_relu(A2)
-    h2_test = tf.nn.leaky_relu(A2_test)
-
-    ################
-    # Output layer #
-    ################
-
-    bias_A3  = w_variable_mean([ 1 ])
-
-    A3 = tf.reduce_sum(tf.reshape(h2, shape = [ tf.shape(x)[0], samples_train, n_units_sec, 1 ]) * W3_train_re, axis = 2) + bias_A3
-    A3_test = tf.reduce_sum(tf.reshape(h2_test, shape = [ tf.shape(x)[0], samples_test, n_units_sec, 1 ]) * W3_test_re, axis = 2) + bias_A3
-
-    #import pdb; pdb.set_trace()
-
-    res_train = tf.reduce_mean(-0.5 * (np.log(2.0 * np.pi) + log_sigma2_noise + (A3 - tf.reshape(y_, shape = [ tf.shape(x)[0], 1, 1 ]))**2 / tf.exp(log_sigma2_noise)), axis = [ 1 ])
-
-    # This is to compute the test log loglikelihood
-
-    log_prob_data_test = tf.reduce_sum(((tf.reduce_logsumexp(-0.5 * tf.log(2.0 * np.pi * (tf.exp(log_sigma2_noise) * std_targets**2)) \
-        - 0.5 * (A3_test * std_targets + mean_targets - tf.reshape(y_, shape = [ tf.shape(x)[0], 1, 1 ]))**2 / (tf.exp(log_sigma2_noise) * std_targets**2), axis = [ 1 ])) \
-        - np.log(samples_test)))
-
-    squared_error = tf.reduce_sum((tf.reduce_mean(A3_test, axis = [ 1 ]) * std_targets + mean_targets - y_ )**2)
-
-
-
-    return res_train, [ log_sigma2_noise, bias_A1, bias_A2, bias_A3 ], squared_error, log_prob_data_test
+    return res_train, error, log_prob_data, A3[:,:,0]*std_targets + mean_targets, pre_noise*std_targets
 
 ###############################################################################
 ###############################################################################
 ###############################################################################
-
 
 def main(layers):
 
-    np.random.seed(123)
-    tf.set_random_seed(123)
+    np.random.seed(seed)
+    tf.set_random_seed(seed)
 
     # We load the original dataset
     data = np.load(original_file)
@@ -428,70 +294,76 @@ def main(layers):
     y_train = (y_train - meanyTrain) / stdyTrain
     X_test = (X_test - meanXTrain) / stdXTrain
 
-
     std_targets = stdyTrain
     mean_targets = meanyTrain
 
-    # =========================================================================
-    #  Calculations in the NNs
-    # =========================================================================
+    # Create the model
 
-    # Generate the weights
-    if layers == 1:
-        weights_train, weights_test, vars_gen = generate_weights( tf.shape(x)[ 0 ], samples_train, samples_test)
-    elif layers == 2:
-        weights_train, weights_test, vars_gen = generate_weights_double( tf.shape(x)[ 0 ], samples_train, samples_test)
+    dim_data = X_train.shape[ 1 ]
+
+    # Placeholders for data and number of samples
+
+    x = tf.placeholder(tf.float32, [ None, dim_data ])
+    y_ = tf.placeholder(tf.float32, [ None, 1 ])
+    n_samples = tf.placeholder(tf.int32, [ 1 ])[ 0 ]
+
+    n_layers_nn = n_layers_gen = n_layers_disc = layers
+
+    if n_layers_nn == 2:
+        total_weights = n_units_nn * (dim_data + n_units_nn) + n_units_nn # Number of weights for the 2 hidden layers case
+    else:
+        total_weights = (dim_data + 1) * n_units_nn  # Total number of weights used
+
+    generator = create_generator(n_units_gen, noise_comps_gen, total_weights, n_layers_gen)
+    discriminator = create_discriminator(n_units_disc, total_weights, n_layers_disc)
+    main_NN = create_main_NN(n_units_nn, n_layers_nn)
+
+    weights = compute_output_generator(generator, tf.shape(x)[ 0 ], n_samples, noise_comps_gen)
 
     # Obtain the moments of the weights and pass the values through the disc
-    mean_w_train, var_w_train = tf.nn.moments(weights_train, axes = [0, 1])
 
-    mean_w_train = tf.stop_gradient(mean_w_train)
-    var_w_train = tf.stop_gradient(var_w_train)
+    mean_w , var_w = tf.nn.moments(weights, axes = [0, 1])
+
+    mean_w = tf.stop_gradient(mean_w)
+    var_w = tf.stop_gradient(var_w)
 
     # Normalize real weights
 
-    norm_weights_train = (weights_train - mean_w_train) / tf.sqrt(var_w_train)
+    norm_weights = (weights - mean_w) / tf.sqrt(var_w)
 
     # Generate samples of a normal distribution with the moments of the weights
-    if layers == 1:
-        w_sampled_gaussian = tf.random_normal(shape = [ tf.shape(x)[0], samples_train, total_number_weights ], mean = 0, stddev = 1, seed = 123)
-    elif layers == 2:
-        w_sampled_gaussian = tf.random_normal(shape = [ tf.shape(x)[0], samples_train, total_number_weights_double ], mean = 0, stddev = 1, seed = 123)
+
+    w_gaussian = tf.random_normal(shape = tf.shape(weights), mean = 0, stddev = 1, seed = seed)
 
     # Obtain the T(z,x) for the real and the sampled weights
 
-    T_real, T_sampled, weights_disc = discriminator(norm_weights_train, w_sampled_gaussian, layers)
+    T_real = compute_output_discriminator(discriminator, norm_weights, layers)
+    T_sampled = compute_output_discriminator(discriminator, w_gaussian, layers)
 
     # Calculate the cross entropy loss for the discriminator
 
     d_loss_real = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=T_real, labels=tf.ones_like(T_real)))
     d_loss_sampled = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=T_sampled, labels=tf.zeros_like(T_sampled)))
 
-    cross_entropy = d_loss_real + d_loss_sampled
+    cross_entropy_per_point = (d_loss_real + d_loss_sampled) / 2.0
 
     # Obtain the KL and ELBO
 
-    logr = -0.5 * tf.reduce_sum(norm_weights_train**2 + tf.log(var_w_train) + np.log(2*np.pi), [ 2 ])
-
-    log_vars_prior = w_variable_variance([ 1 ])
-
-    logz = -0.5 * tf.reduce_sum((weights_train)**2 / tf.exp(log_vars_prior) + log_vars_prior + np.log(2*np.pi), [ 2 ])
-
+    logr = -0.5 * tf.reduce_sum(norm_weights**2 + tf.log(var_w) + np.log(2.0 * np.pi), [ 2 ])
+    logz = -0.5 * tf.reduce_sum((weights)**2 / tf.exp(main_NN['log_vars_prior']) + main_NN['log_vars_prior'] + np.log(2.0 * np.pi), [ 2 ])
     KL = T_real + logr - logz
 
-    # Call the main network to calculate the error metrics for the primary system
-    if layers == 1:
-        res_train, vars_network, squared_error, log_prob_data_test = exp_log_likelihood(mean_targets, std_targets, weights_train, weights_test) # main loss in the VAE
-    elif layers == 2:
-        res_train, vars_network, squared_error, log_prob_data_test = exp_log_likelihood_double(mean_targets, std_targets, weights_train, weights_test) # main loss in the VAE
+    res_train, error, log_prob_data, results_mean, results_std = compute_outputs_main_NN(main_NN, x, y_, mean_targets, std_targets, weights, \
+        n_samples, dim_data)
 
     # Make the estimates of the ELBO for the primary classifier
-    ELBO = tf.reduce_sum(res_train) - tf.reduce_mean(KL) * tf.cast(tf.shape(x)[ 0 ], tf.float32) / tf.cast(total_training_data, tf.float32)
+
+    ELBO = (tf.reduce_sum(res_train) - tf.reduce_mean(KL) * tf.cast(tf.shape(x)[ 0 ], tf.float32) / \
+        tf.cast(total_training_data, tf.float32)) * tf.cast(total_training_data, tf.float32) / tf.cast(tf.shape(x)[ 0 ], tf.float32)
 
     neg_ELBO = -ELBO
     main_loss = neg_ELBO
     mean_ELBO = ELBO
-
 
     # KL y res_train have shape batch_size x n_samples
 
@@ -499,26 +371,30 @@ def main(layers):
 
     # Create the variable lists to be updated
 
-    vars_primal = vars_gen + [ log_vars_prior ] + vars_network
-    vars_dual = weights_disc
+    vars_primal = get_variables_generator(generator) + get_variables_main_NN(main_NN)
+    vars_dual = get_variables_discriminator(discriminator)
 
     train_step_primal = tf.train.AdamOptimizer(primal_rate).minimize(main_loss, var_list = vars_primal)
-    train_step_dual = tf.train.AdamOptimizer(dual_rate).minimize(cross_entropy, var_list = vars_dual)
+    train_step_dual = tf.train.AdamOptimizer(dual_rate).minimize(cross_entropy_per_point, var_list = vars_dual)
 
-    # Calculate the squared error
-
-    config = tf.ConfigProto(intra_op_parallelism_threads=1, inter_op_parallelism_threads=1, allow_soft_placement=True, device_count = {'CPU': 1})
+    config = tf.ConfigProto(intra_op_parallelism_threads=1, inter_op_parallelism_threads=1, \
+        allow_soft_placement=True, device_count = {'CPU': 1})
 
     with tf.Session(config = config) as sess:
 
         sess.run(tf.global_variables_initializer())
+
         total_ini = time.time()
+
+        # Change the value of alpha to begin exploring using the second value given
 
         for epoch in range(n_epochs):
 
-            for i_batch in range(int(np.ceil(size_train / n_batch))):
+            L = 0.0
+            ce_estimate = 0.0
+            kl = 0.0
 
-                L = 0.0
+            for i_batch in range(int(np.ceil(size_train / n_batch))):
 
                 ini = time.clock()
                 ini_ref = time.time()
@@ -528,63 +404,124 @@ def main(layers):
 
                 batch = [ X_train[ i_batch * n_batch : last_point, : ] , y_train[ i_batch * n_batch : last_point, ] ]
 
-                sess.run(train_step_dual, feed_dict={x: batch[0], y_: batch[1]})
-                sess.run(train_step_primal, feed_dict={x: batch[0], y_: batch[1]})
+                sess.run(train_step_dual, feed_dict={x: batch[ 0 ], y_: batch[ 1 ], n_samples: n_samples_train})
+                sess.run(train_step_primal, feed_dict={x: batch[ 0 ], y_: batch[ 1 ], n_samples: n_samples_train})
 
-                value = sess.run(mean_ELBO, feed_dict={x: batch[0], y_: batch[1]})
-                kl = sess.run(mean_KL, feed_dict={x: batch[0], y_: batch[1]})
-                L += value
+                L_tmp, kl_tmp, ce_estimate_tmp = sess.run([ mean_ELBO, mean_KL, cross_entropy_per_point] , feed_dict={x: batch[ 0 ], y_: batch[ 1 ], n_samples: n_samples_train})
+                L += L_tmp
+                kl += kl_tmp
+                ce_estimate += ce_estimate_tmp
 
                 fini_train = time.clock()
 
-                if i_batch % sampling_batches == 0:
+                if i_batch % n_batches_to_report == 0 and not (i_batch == 0 and epoch == 0):
 
+                    sys.stdout.write('\n')
                     ini_test = time.time()
 
-                    # We do the test evaluation RMSE
+                    ###################################################
+                    # CRPS by the ensemble method for each test value #
+                    ###################################################
+
+                    # crps_raw = np.empty(len(labels))
+                    # for i in range(len(labels)): crps_raw[i] = crps_ensemble(labels[i,0], results[i,:])
+                    # mean_crps_ensemble = np.mean(crps_raw)
+
+                    # np.savetxt('results_AADM/' + str(alpha) + 'raw_CRPS_' + str(split) + ".txt", crps_raw)
+                    # np.savetxt('results_AADM/' + str(alpha) + 'mean_CRPS_' + str(split) + ".txt", [ mean_crps ])
+
+                    ###########################################
+                    # Exact CRPS for the mixture of gaussians #
+                    ###########################################
+
+
+                    # np.savetxt('results_AADM/' + str(alpha) + 'raw_exact_CRPS_' + str(split) + ".txt", crps_exact)
+                    # np.savetxt('results_AADM/' + str(alpha) + 'mean_exact_CRPS_' + str(split) + ".txt", [ mean_crps_exact ])
+
+                    # We do the test evaluation for the error metrics
                     SE = 0.0
-                    for i in range(int(np.ceil(X_test.shape[ 0 ] / n_batch))):
+                    LL  = 0.0
+                    mean_crps_exact = 0.0
+                    n_batches_to_process = int(np.ceil(X_test.shape[ 0 ] / n_batch))
+                    for i in range(n_batches_to_process):
 
                         last_point = np.minimum(n_batch * (i + 1), X_test.shape[ 0 ])
 
                         batch = [ X_test[ i * n_batch : last_point, : ] , y_test[ i * n_batch : last_point, ] ]
 
-                        SE += sess.run(squared_error, feed_dict={x: batch[0], y_: batch[1]}) / batch[ 0 ].shape[ 0 ]
+                        SE_tmp, LL_tmp, labels, res_mean, res_std = sess.run([ error, log_prob_data, y_, results_mean, results_std ], \
+                            feed_dict={x: batch[0], y_: batch[1], n_samples: n_samples_test})
 
-                    RMSE = np.sqrt(SE / int(np.ceil(X_test.shape[ 0 ] / n_batch)))
+                        SE += SE_tmp
+                        LL += LL_tmp
 
-                    # We do the test evaluation RMSE
-                    LL = 0.0
-                    for j in range(int(np.ceil(X_test.shape[ 0 ] / n_batch))):
+                        # Exact CRPS
+                        shape_quad = res_mean.shape
 
-                        last_point = np.minimum(n_batch * (j + 1), X_test.shape[ 0 ])
+                        res_var = res_std ** 2
+                        crps_exact = np.empty([ shape_quad[0] ])
 
-                        batch = [ X_test[ j * n_batch : last_point, : ] , y_test[ j * n_batch : last_point, ] ]
+                        for i in range(shape_quad[0]):
+                            means_vec = res_mean[i, :]
+                            vars_vec = res_var[i, :]
 
-                        LL += sess.run(log_prob_data_test, feed_dict={x: batch[0], y_: batch[1]}) / batch[ 0 ].shape[ 0 ]
+                            means_diff = np.empty([shape_quad[1], shape_quad[1]])
+                            vars_sum = np.empty([shape_quad[1], shape_quad[1]])
+                            ru, cu = np.triu_indices(means_vec.size,1)
+                            rl, cl = np.tril_indices(means_vec.size,1)
 
-                    TestLL = (LL / int(np.ceil(X_test.shape[ 0 ] / n_batch)))
+                            means_diff[ru, cu] = means_vec[ru] - means_vec[cu]
+                            means_diff[rl, cl] = means_vec[rl] - means_vec[cl]
+                            vars_sum[ru, cu] = vars_vec[ru] + vars_vec[cu]
+                            vars_sum[rl, cl] = vars_vec[rl] + vars_vec[cl]
+
+                            # Term only depending on the means and vars
+                            fixed_term = 1 / 2 * np.mean(aux_crps(means_diff, vars_sum))
+
+                            # Term that depends on the real value of the data
+                            dev_mean = labels[i, 0] - means_vec
+                            data_term = np.mean(aux_crps(dev_mean, vars_vec))
+
+                            crps_exact[i] = data_term - fixed_term
+
+                        mean_crps_exact += np.mean(crps_exact)
+
+                    RMSE = np.sqrt(SE / float(X_test.shape[ 0 ]))
+                    TestLL = (LL / float(X_test.shape[ 0 ]))
+                    mean_CRPS = (mean_crps_exact / float(X_test.shape[ 0 ]) )
 
                     fini_test = time.time()
                     fini = time.clock()
                     fini_ref = time.time()
                     total_fini = time.time()
 
-                    with open("results_AVB_airlines/res_avb_airlines.txt", "a") as res_file:
-                       res_file.write('AVB batch %g datetime %s epoch %d ELBO %g KL %g real_time %g cpu_time %g train_time %g test_time %g total_time %g LL %g RMSE %g' % (i_batch, str(datetime.now()), epoch, L, kl, (fini_ref - ini_ref), (fini - ini), (fini_train - ini_train), (fini_test - ini_test), (total_fini - total_ini), TestLL, RMSE) + "\n")
+                    with open("results_AADM_airlines/res_avb_airlines.txt", "a") as res_file:
+                        string = ('AVB batch %g datetime %s epoch %d ELBO %g CROSS-ENT %g KL %g real_time %g cpu_time %g ' + \
+                            'train_time %g test_time %g total_time %g LL %g RMSE %g CRPS_exact %g ') % (i_batch, str(datetime.now()), epoch, \
+                            L / n_batches_to_report, ce_estimate / n_batches_to_report, kl / n_batches_to_report, (fini_ref - \
+                            ini_ref), (fini - ini), (fini_train - ini_train), (fini_test - ini_test), (total_fini - total_ini), TestLL, \
+                            RMSE, mean_CRPS)
+                        res_file.write(string + "\n")
+                        print(string)
+                        sys.stdout.flush()
 
+                    L = 0.0
+                    ce_estimate = 0.0
+                    kl = 0.0
 
 if __name__ == '__main__':
 
 
-    if not os.path.isdir("results_AVB_airlines"):
-        os.makedirs("results_AVB_airlines")
+    if not os.path.isdir("results_AADM_airlines"):
+        os.makedirs("results_AADM_airlines")
 
-    layers = int(sys.argv[ 1 ])
+    layers = 2 # int(sys.argv[1])
 
-    if os.path.isfile("results_AVB_airlines/res_avb_airlines.txt"):
-        with open("results_AVB_airlines/res_avb_airlines.txt", "w") as file:
+    if os.path.isfile("results_AADM_airlines/res_avb_airlines.txt"):
+        with open("results_AADM_airlines/res_avb_airlines.txt", "w") as file:
             file.close()
 
 
     main(layers)
+
+

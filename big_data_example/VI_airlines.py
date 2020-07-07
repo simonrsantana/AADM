@@ -18,6 +18,9 @@ import argparse
 import sys
 import time
 from datetime import datetime
+# from properscoring import crps_ensemble
+#from _crps import crps_ensemble, crps_quadrature
+from scipy.stats import norm
 
 import tensorflow as tf
 import numpy as np
@@ -31,14 +34,14 @@ os.chdir(".")
 # =============================================================================
 
 # File to be analyzed
-original_file = "shuffle_airlines.npy"
+original_file = "shuffle_airplanes.npy"
 
 # This is the total number of training samples
 total_training_data = 1.0
 n_batch = 100
-n_epochs = 150 # We do not expect the algorithm to fulfill more than a few epochs before it reaches convergence
+n_epochs = 1000 # We do not expect the algorithm to fulfill more than a few epochs before it reaches convergence
 n_data_test = 10000
-sampling_batches = 100       # How often do we want to sample the batches for results in the RMSE and LL
+sampling_batches = 1500       # How often do we want to sample the batches for results in the RMSE and LL
 
 mean_targets = 0.0
 std_targets = 1.0
@@ -73,6 +76,13 @@ def w_variable_variance(shape):
   initial = tf.random_normal(shape = shape, stddev = 0.1) - 5.0 # mean 0 stddev 1
   return tf.Variable(initial)
 
+# Define the auxiliary function to help with the calculations
+def aux_crps(mu, sigma_2):
+    first_term = 2 * np.sqrt(sigma_2) * norm.pdf( mu/np.sqrt(sigma_2) )
+    sec_term = mu * (2 * norm.cdf( mu/np.sqrt(sigma_2) ) - 1)
+    aux_term = first_term + sec_term
+
+    return aux_term
 
 ###############################################################################
 ########################## Estructura de la red ###############################
@@ -143,9 +153,6 @@ def exp_log_likelihood(mean_targets, std_targets, weights_train, weights_test):
 
     # Separate the weights and reshape the tensors
 
-#    W1_train = tf.reshape(weights_train[:,:,:(dim_data * n_units)], shape = [ tf.shape(x)[0], samples_train, n_units, dim_data ])
-#    W2_train  = tf.reshape(weights_train[:,:,(dim_data * n_units):], shape = [ tf.shape(x)[0], samples_train, n_units, 1 ])
-
     W1_train_re = tf.reshape(weights_train[:,:,:(dim_data * n_units)], shape = [ tf.shape(x)[0], samples_train, n_units, dim_data ])
     W2_train_re  = tf.reshape(weights_train[:,:,(dim_data * n_units):], shape = [ tf.shape(x)[0], samples_train, n_units, 1 ])
 
@@ -187,7 +194,11 @@ def exp_log_likelihood(mean_targets, std_targets, weights_train, weights_test):
 
     squared_error = tf.reduce_sum((tf.reduce_mean(A2_test, axis = [ 1 ]) * std_targets + mean_targets - y_ )**2)
 
-    return res_train, [ log_sigma2_noise, bias_A1, bias_A2 ], squared_error, log_prob_data_test
+    pre_noise = tf.random_normal(shape = [ tf.shape(x)[0], samples_test ]) * tf.exp(log_sigma2_noise)
+    y_test_pre  = pre_noise + A2_test[:,:,0]
+    y_test = y_test_pre * std_targets + mean_targets
+
+    return res_train, [ log_sigma2_noise, bias_A1, bias_A2 ], squared_error, log_prob_data_test, A2_test[:,:,0]*std_targets + mean_targets, pre_noise*std_targets
 
 
 # Case with 2 layers
@@ -256,7 +267,11 @@ def exp_log_likelihood_double(mean_targets, std_targets, weights_train, weights_
     squared_error = tf.reduce_sum((tf.reduce_mean(A3_test, axis = [ 1 ]) * std_targets + mean_targets - y_ )**2)
 
 
-    return res_train, [ log_sigma2_noise, bias_A1, bias_A2, bias_A3 ], squared_error, log_prob_data_test
+    pre_noise = tf.random_normal(shape = [ tf.shape(x)[0], samples_test ]) * tf.exp(log_sigma2_noise)
+    y_test_pre  = pre_noise + A3_test[:,:,0]
+    y_test = y_test_pre * std_targets + mean_targets
+
+    return res_train, [ log_sigma2_noise, bias_A1, bias_A2, bias_A3 ], squared_error, log_prob_data_test, A3_test[:,:,0]*std_targets + mean_targets, pre_noise*std_targets
 
 
 ###############################################################################
@@ -319,9 +334,9 @@ def main(layers):
 
     # Calculate the error metrics in the VAE
     if layers == 1:
-        res_train, vars_network, squared_error, log_prob_data_test = exp_log_likelihood(mean_targets, std_targets, weights_train, weights_test)
+        res_train, vars_network, squared_error, log_prob_data_test, results_mean, results_std = exp_log_likelihood(mean_targets, std_targets, weights_train, weights_test)
     elif layers == 2:
-        res_train, vars_network, squared_error, log_prob_data_test = exp_log_likelihood_double(mean_targets, std_targets, weights_train, weights_test)
+        res_train, vars_network, squared_error, log_prob_data_test, results_mean, results_std = exp_log_likelihood_double(mean_targets, std_targets, weights_train, weights_test)
 
     log_vars_prior = w_variable_variance([ 1 ])
 
@@ -359,6 +374,7 @@ def main(layers):
             for i_batch in range(int(np.ceil(size_train / n_batch))):
 
                 L = 0.0
+                kl = 0.0
 
                 ini = time.clock()
                 ini_ref = time.time()
@@ -368,12 +384,11 @@ def main(layers):
 
                 batch = [ X_train[ i_batch * n_batch : last_point, : ] , y_train[ i_batch * n_batch : last_point, ] ]
 
-#                sess.run(train_step_dual, feed_dict={x: batch[0], y_: batch[1]})
                 sess.run(train_step_primal, feed_dict={x: batch[0], y_: batch[1]})
 
-                value = sess.run(mean_ELBO, feed_dict={x: batch[0], y_: batch[1]})
-                kl = sess.run(mean_KL, feed_dict={x: batch[0], y_: batch[1]})
+                value, kl_tmp = sess.run( [mean_ELBO, mean_KL] , feed_dict={x: batch[0], y_: batch[1]})
                 L += value
+                kl += kl_tmp
 
                 fini_train = time.clock()
 
@@ -382,28 +397,56 @@ def main(layers):
                     ini_test = time.time()
 
                     SE = 0.0
+                    LL = 0.0
+                    mean_crps_exact = 0.0
+
                     for i in range(int(np.ceil(n_data_test / n_batch))):
 
                         last_point = np.minimum(n_batch * (i + 1), n_data_test)
 
                         batch = [ X_test[ i * n_batch : last_point, : ] , y_test[ i * n_batch : last_point, ] ]
 
-                        SE += sess.run(squared_error, feed_dict={x: batch[0], y_: batch[1]}) / batch[ 0 ].shape[ 0 ]
+                        SE_tmp, LL_tmp, labels, res_mean, res_std = sess.run([ squared_error, log_prob_data_test, y_, results_mean, results_std ], \
+                            feed_dict={x: batch[0], y_: batch[1]}) #, n_samples: n_samples_test})
+
+                        SE += SE_tmp
+                        LL += LL_tmp
+
+                        # Exact CRPS
+                        shape_quad = res_mean.shape
+
+                        res_var = res_std ** 2
+                        crps_exact = np.empty([ shape_quad[0] ])
+
+                        for i in range(shape_quad[0]):
+                            means_vec = res_mean[i, :]
+                            vars_vec = res_var[i, :]
+
+                            means_diff = np.empty([shape_quad[1], shape_quad[1]])
+                            vars_sum = np.empty([shape_quad[1], shape_quad[1]])
+                            ru, cu = np.triu_indices(means_vec.size,1)
+                            rl, cl = np.tril_indices(means_vec.size,1)
+
+                            means_diff[ru, cu] = means_vec[ru] - means_vec[cu]
+                            means_diff[rl, cl] = means_vec[rl] - means_vec[cl]
+                            vars_sum[ru, cu] = vars_vec[ru] + vars_vec[cu]
+                            vars_sum[rl, cl] = vars_vec[rl] + vars_vec[cl]
+
+                            # Term only depending on the means and vars
+                            fixed_term = 1 / 2 * np.mean(aux_crps(means_diff, vars_sum))
+
+                            # Term that depends on the real value of the data
+                            dev_mean = labels[i, 0] - means_vec
+                            data_term = np.mean(aux_crps(dev_mean, vars_vec))
+
+                            crps_exact[i] = data_term - fixed_term
+
+                        mean_crps_exact += np.mean(crps_exact)
 
                     RMSE = np.sqrt(SE / int(np.ceil(n_data_test / n_batch)))
-
-                    # We do the test evaluation RMSE
-
-                    LL = 0.0
-                    for j in range(int(np.ceil(n_data_test / n_batch))):
-
-                        last_point = np.minimum(n_batch * (j + 1), n_data_test)
-
-                        batch = [ X_test[ j * n_batch : last_point, : ] , y_test[ j * n_batch : last_point, ] ]
-
-                        LL += sess.run(log_prob_data_test, feed_dict={x: batch[0], y_: batch[1]}) / batch[ 0 ].shape[ 0 ]
-
                     TestLL = (LL / int(np.ceil(n_data_test / n_batch)))
+                    mean_CRPS = (mean_crps_exact / float(X_test.shape[ 0 ]) )
+
 
                     fini = time.clock()
                     fini_ref = time.time()
@@ -411,12 +454,13 @@ def main(layers):
                     total_fini = time.time()
 
                     with open("results_VI_airlines/res_vi.txt", "a") as res_file:
-                        res_file.write('VI batch %g datetime %s epoch %d ELBO %g KL %g real_time %g cpu_time %g train_time %g test_time %g total_time %g LL %g RMSE %g' % (i_batch, str(datetime.now()), epoch, L, kl, (fini_ref - ini_ref), (fini - ini), (fini_train - ini_train), (fini_test - ini_test), (total_fini - total_ini), TestLL, RMSE) + "\n")
-
-
-#            timing.append(fini-ini)
-#            tmp_kl.append(kl)
-#            tmp_elbo.append(L)
+                        string = ('VI batch %g datetime %s epoch %d ELBO %g KL %g real_time %g cpu_time %g ' + \
+                            'train_time %g test_time %g total_time %g LL %g RMSE %g CRPS_exact %g') % (i_batch, str(datetime.now()), epoch, \
+                            L, kl, (fini_ref - ini_ref), (fini - ini), (fini_train - ini_train), (fini_test - ini_test), (total_fini - total_ini), \
+                            TestLL, RMSE, mean_CRPS)
+                        res_file.write(string + "\n")
+                        print(string)
+                        sys.stdout.flush()
 
 
 
@@ -429,7 +473,8 @@ if __name__ == '__main__':
         with open("results_VI_airlines/res_vi.txt", "w") as file:
             file.close()
 
-    layers = int(sys.argv[ 1 ])
+    layers = 2#  int(sys.argv[ 1 ])
 
     # Call main (in this case, no splits are needed and therefore there are no arguments)
     main(layers)
+
